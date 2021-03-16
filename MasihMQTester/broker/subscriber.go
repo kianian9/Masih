@@ -11,15 +11,13 @@ import (
 
 type Subscriber struct {
 	PeerOperations
-	Id              int
-	NumMessages     uint
-	MessageSize     int64
-	HasStarted      bool
-	Started         int64
-	Stopped         int64
-	ConsumerCounter *uint
-	Results         *Result
-	//SubscriberResultMutex	*sync.Mutex Kanske inte behövs då varje subscriber har sin egna results
+	Id           int
+	NumMessages  uint
+	MessageSize  int64
+	HasStarted   bool
+	Started      int64
+	Stopped      int64
+	Results      *Result
 	SyncMutex    *sync.Mutex
 	SyncCond     *sync.Cond
 	NrReadyPeers *int
@@ -41,7 +39,6 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 	// Waiting for all peers to be ready
 	subscriber.SyncMutex.Lock()
 	for nrPeers != *subscriber.NrReadyPeers {
-		//fmt.Printf("Subscriber id: %d waiting for other peers...\n", subscriber.Id)
 		subscriber.SyncCond.Wait()
 	}
 	subscriber.SyncCond.Broadcast()
@@ -52,8 +49,11 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 	var nrConsumedMessages uint = 0
 	latencies := hdrhistogram.New(0, maxRecordableLatencyMS, sigFigs)
 	subscriber.Started = time.Now().UnixNano()
+	messSent := 0
+	t1 := time.Now().UnixNano() / 1000000000
 	for nrConsumedMessages < subscriber.NumMessages {
 		message, err := subscriber.ReceiveMessage()
+
 		now := time.Now().UnixNano()
 		if err != nil {
 			log.Printf("Subscriber error: %s", err.Error())
@@ -63,6 +63,12 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 		then, _ := binary.Varint(message)
 		latencies.RecordValue((now - then) / 1000000)
 		nrConsumedMessages += 1
+		t2 := time.Now().UnixNano() / 1000000000
+		if t2-t1 >= 1 {
+			fmt.Println("Throughput Sub(mess/sec): ", (int(nrConsumedMessages) - messSent))
+			messSent = int(nrConsumedMessages)
+			t1 = t2
+		}
 	}
 	subscriber.Stopped = time.Now().UnixNano()
 	durationMS := float32(subscriber.Stopped-subscriber.Started) / 1000000

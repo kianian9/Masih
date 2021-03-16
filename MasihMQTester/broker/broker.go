@@ -11,18 +11,17 @@ import (
 const (
 	QUOROM_QUEUE  = "QUORUM"
 	CLASSIC_QUEUE = "CLASSIC"
+	Topic         = "test"
 )
 
 type PeerOperations interface {
-	//StartPublishing(nrPeers int)
-	//StartSubscribing(nrPeers int)
-	//PublishMessage(message []byte) error
-	//PublishMessage(message []byte)
 	ReceiveMessage() ([]byte, error)
 	SetupPublishRoutine()
 	SendChannel() chan<- []byte
 	ErrorChannel() <-chan error
 	DoneChannel()
+	// Needed due to Kafka's Confluent Library
+	DeliveredChannel() <-chan bool
 }
 
 type Results struct {

@@ -4,6 +4,7 @@ package main
 import (
 	"Masih/MasihMQTester/broker"
 	"Masih/MasihMQTester/broker/amqp"
+	"Masih/MasihMQTester/broker/kafka"
 	"flag"
 	"fmt"
 	"os"
@@ -197,8 +198,8 @@ func newBrokerPeer(brokerSettings broker.MQSettings) peer {
 	switch brokerSettings.BrokerName {
 	case RabbitMQ:
 		return amqp.NewBrokerPeer(brokerSettings)
-	//case Kafka:
-	//	return kafka.NewPeer(host)
+	case Kafka:
+		return kafka.NewBrokerPeer(brokerSettings)
 	case STAN:
 		return nil
 		//return nil, nil

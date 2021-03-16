@@ -14,19 +14,15 @@ const (
 )
 
 // Peer stores specific AMQP broker connection information
-// TODO: Maybe remove e.g. inbound, send, errors, done etc.
 type Peer struct {
-	conn    *amqp.Connection
-	queue   *amqp.Queue
-	channel *amqp.Channel
-	inbound <-chan amqp.Delivery
-	conf    <-chan amqp.Confirmation
-	send    chan []byte
-	errors  chan error
-	done    chan bool
-	//publish broker.PeerOperations
-	//publisher *broker.Publisher
-	//subscriber *broker.Subscriber
+	conn            *amqp.Connection
+	queue           *amqp.Queue
+	channel         *amqp.Channel
+	inbound         <-chan amqp.Delivery
+	send            chan []byte
+	errors          chan error
+	done            chan bool
+	messagesFlushed chan bool
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -37,51 +33,39 @@ type BrokerPeer struct {
 	producers     int
 	messageSize   uint64
 	numMessages   uint
-	//publisher  		[]*Peer
-	publisher []*broker.Publisher
-	//subscriber 		[]*Peer
-	subscriber []*broker.Subscriber
-	isDone     bool
-	//publisherResults 	broker.Result
-	//subscriberResults 	broker.Result
-	//publisherMutex  	sync.Mutex
-	//subscriberMutex 	sync.Mutex
-	syncMutex    *sync.Mutex
-	syncCond     *sync.Cond
-	nrReadyPeers *int
-	nrDonePeers  *int
+	publisher     []*broker.Publisher
+	subscriber    []*broker.Subscriber
+	syncMutex     *sync.Mutex
+	syncCond      *sync.Cond
+	nrReadyPeers  *int
+	nrDonePeers   *int
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
-	//pubCounter := new(uint)
-	//*pubCounter = 0
-	//m := sync.Mutex{}
 	// Calculate nr messages to publish per publisher
 	numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
 
 	// Create publishers
 	for i := 1; i <= bp.producers; i++ {
 		publisherPeer := &Peer{
-			conn:    nil,
-			queue:   nil,
-			channel: nil,
-			inbound: nil,
-			send:    make(chan []byte),
-			errors:  make(chan error, 1),
-			done:    make(chan bool),
+			conn:            nil,
+			queue:           nil,
+			channel:         nil,
+			inbound:         nil,
+			send:            make(chan []byte),
+			errors:          make(chan error, 1),
+			done:            make(chan bool),
+			messagesFlushed: make(chan bool),
 		}
 		publisher := &broker.Publisher{
 			PeerOperations:      publisherPeer,
 			Id:                  i,
 			NrMessagesToPublish: numMessPubArr[i-1],
 			MessageSize:         bp.messageSize,
-			//PublisherCounter: pubCounter,
-			//Results: &bp.publisherResults,
-			//PublisherResultMutex: &m,
-			SyncMutex:    bp.syncMutex,
-			SyncCond:     bp.syncCond,
-			NrDonePeers:  bp.nrDonePeers,
-			NrReadyPeers: bp.nrReadyPeers,
+			SyncMutex:           bp.syncMutex,
+			SyncCond:            bp.syncCond,
+			NrDonePeers:         bp.nrDonePeers,
+			NrReadyPeers:        bp.nrReadyPeers,
 		}
 		bp.publisher[i-1] = publisher
 
@@ -97,9 +81,6 @@ func (bp *BrokerPeer) SetupPublishers() error {
 func (bp *BrokerPeer) SetupSubscribers() error {
 	subCounter := new(uint)
 	*subCounter = 0
-	//m := sync.Mutex{}
-	// Calculate nr messages to subscribe per subscriber
-	//numMessSubArr := broker.DividePeerMessages(bp.consumers, bp.numMessages)
 
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
@@ -113,19 +94,16 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 			done:    nil,
 		}
 		subscriber := &broker.Subscriber{
-			PeerOperations:  subscriberPeer,
-			Id:              i,
-			NumMessages:     bp.numMessages,
-			HasStarted:      false,
-			Started:         0,
-			Stopped:         0,
-			ConsumerCounter: subCounter,
-			//Results: &bp.subscriberResults,
-			//SubscriberResultMutex: &m,
-			SyncMutex:    bp.syncMutex,
-			SyncCond:     bp.syncCond,
-			NrDonePeers:  bp.nrDonePeers,
-			NrReadyPeers: bp.nrReadyPeers,
+			PeerOperations: subscriberPeer,
+			Id:             i,
+			NumMessages:    bp.numMessages,
+			HasStarted:     false,
+			Started:        0,
+			Stopped:        0,
+			SyncMutex:      bp.syncMutex,
+			SyncCond:       bp.syncCond,
+			NrDonePeers:    bp.nrDonePeers,
+			NrReadyPeers:   bp.nrReadyPeers,
 		}
 		bp.subscriber[i-1] = subscriber
 
@@ -155,6 +133,7 @@ func (p *Peer) SetupPublishRoutine() {
 					p.errors <- err
 				}
 			case <-p.done:
+				p.messagesFlushed <- true
 				return
 			}
 		}
@@ -176,25 +155,10 @@ func (p *Peer) DoneChannel() {
 	p.done <- true
 }
 
-/*
-func (p* Peer) PublishMessage(message []byte) {
-	go func() {
-
-		if err := p.channel.Publish(
-			exchange, // exchange
-			"",       // routing key
-			false,    // mandatory
-			false,    // immediate
-			amqp.Publishing{
-				Body:        message,
-			},
-		); err != nil {
-			p.errors <- err
-		}
-	}()
-
+// DeliveredChannel returns the channel on which the peer can check for delivery completion.
+func (p *Peer) DeliveredChannel() <-chan bool {
+	return p.messagesFlushed
 }
-*/
 
 func (p *Peer) ReceiveMessage() ([]byte, error) {
 	message := <-p.inbound
@@ -228,9 +192,6 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	if err != nil {
 		return err
 	}
-
-	confirmationChan := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
-	p.conf = confirmationChan
 
 	return nil
 }
@@ -375,7 +336,7 @@ func (bp *BrokerPeer) Teardown() {
 
 }
 
-// NewPeer creates and returns a new Peer for communicating with AMQP
+// NewBrokerPeer creates and returns a new Peer for communicating with AMQP
 func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	connectionURL := "amqp://" + settings.Username + ":" + settings.Password + "@" + settings.BrokerHost + ":" + settings.BrokerPort + "/"
 	m := sync.Mutex{}
@@ -394,7 +355,6 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 		numMessages:   settings.NumMessages,
 		publisher:     make([]*broker.Publisher, settings.Producers),
 		subscriber:    make([]*broker.Subscriber, settings.Consumers),
-		isDone:        false,
 		syncMutex:     &m,
 		syncCond:      c,
 		nrReadyPeers:  nrReadyPeers,
