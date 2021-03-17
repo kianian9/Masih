@@ -92,6 +92,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *producers == 0 && *consumers == 0 {
+		fmt.Fprintf(os.Stderr, "Error: There must be at least one producer or consumer!\n")
+		os.Exit(1)
+	}
+
 	brokerSetting := broker.MQSettings{
 		BrokerName:  *brokerName,
 		BrokerHost:  *brokerHost,

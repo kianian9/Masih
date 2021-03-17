@@ -19,6 +19,7 @@ type Peer struct {
 	errors          chan error
 	done            chan bool
 	numMessages     uint
+	messageSize     uint64
 	messagesFlushed chan bool
 }
 
@@ -39,36 +40,40 @@ type BrokerPeer struct {
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
-	// Calculate nr messages to publish per publisher
-	numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
 
-	// Create publishers
-	for i := 1; i <= bp.producers; i++ {
-		publisherPeer := &Peer{
-			producer:        nil,
-			consumer:        nil,
-			send:            make(chan []byte),
-			errors:          make(chan error, 1),
-			done:            make(chan bool),
-			numMessages:     bp.numMessages,
-			messagesFlushed: make(chan bool),
-		}
-		publisher := &broker.Publisher{
-			PeerOperations:      publisherPeer,
-			Id:                  i,
-			NrMessagesToPublish: numMessPubArr[i-1],
-			MessageSize:         bp.messageSize,
-			SyncMutex:           bp.syncMutex,
-			SyncCond:            bp.syncCond,
-			NrDonePeers:         bp.nrDonePeers,
-			NrReadyPeers:        bp.nrReadyPeers,
-		}
-		bp.publisher[i-1] = publisher
+	if bp.producers > 0 {
+		// Calculate nr messages to publish per publisher
+		numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
 
-		// Setup publisher connection
-		err := publisherPeer.SetupPublisherConnection(bp.connectionURL)
-		if err != nil {
-			return err
+		// Create publishers
+		for i := 1; i <= bp.producers; i++ {
+			publisherPeer := &Peer{
+				producer:        nil,
+				consumer:        nil,
+				send:            make(chan []byte),
+				errors:          make(chan error, 1),
+				done:            make(chan bool),
+				numMessages:     bp.numMessages,
+				messageSize:     bp.messageSize,
+				messagesFlushed: make(chan bool),
+			}
+			publisher := &broker.Publisher{
+				PeerOperations:      publisherPeer,
+				Id:                  i,
+				NrMessagesToPublish: numMessPubArr[i-1],
+				MessageSize:         bp.messageSize,
+				SyncMutex:           bp.syncMutex,
+				SyncCond:            bp.syncCond,
+				NrDonePeers:         bp.nrDonePeers,
+				NrReadyPeers:        bp.nrReadyPeers,
+			}
+			bp.publisher[i-1] = publisher
+
+			// Setup publisher connection
+			err := publisherPeer.SetupPublisherConnection(bp.connectionURL)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -194,10 +199,12 @@ func (p *Peer) ReceiveMessage() ([]byte, error) {
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	// Connecting to the broker
 	nrMaxBufferedMsgs := strconv.FormatUint(uint64(p.numMessages), 10)
+	maxBufferSizeInKB := strconv.FormatUint((uint64(p.numMessages)*p.messageSize)/1000, 10)
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers":            connectionURL,
 		"acks":                         "all",
 		"queue.buffering.max.messages": nrMaxBufferedMsgs,
+		"queue.buffering.max.kbytes":   maxBufferSizeInKB,
 	})
 
 	if err != nil {
