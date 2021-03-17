@@ -11,7 +11,7 @@ import (
 const (
 	QUOROM_QUEUE  = "QUORUM"
 	CLASSIC_QUEUE = "CLASSIC"
-	Topic         = "test"
+	Topic         = "test3"
 )
 
 type PeerOperations interface {
@@ -40,6 +40,7 @@ type MQSettings struct {
 	Producers   uint
 	Consumers   uint
 	QueueType   string
+	ClusterID   string
 }
 
 type Result struct {

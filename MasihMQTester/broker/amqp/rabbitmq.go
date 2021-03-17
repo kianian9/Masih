@@ -1,5 +1,6 @@
 package amqp
 
+// TODO: FIX IMPORT TO github...
 import (
 	"Masih/MasihMQTester/broker"
 	"fmt"
@@ -166,21 +167,22 @@ func (p *Peer) ReceiveMessage() ([]byte, error) {
 }
 
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
+	var err error = nil
 	// Connecting to the broker
-	conn, err := amqp.Dial(connectionURL)
+	p.conn, err = amqp.Dial(connectionURL)
 	if err != nil {
 		return err
 	}
-	p.conn = conn
+	//p.conn = conn
 
-	channel, err := conn.Channel()
+	p.channel, err = p.conn.Channel()
 	if err != nil {
 		return err
 	}
-	p.channel = channel
+	//p.channel = channel
 
 	// Sets the channel's exchange
-	err = channel.ExchangeDeclare(
+	err = p.channel.ExchangeDeclare(
 		exchange,     // name
 		exchangeType, // type
 		true,         // durable
@@ -197,22 +199,23 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 }
 
 func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error {
+	var err error = nil
 	// Connecting to the broker
-	conn, err := amqp.Dial(connectionURL)
+	p.conn, err = amqp.Dial(connectionURL)
 	if err != nil {
 		return err
 	}
-	p.conn = conn
+	//p.conn = conn
 
 	// Creates a channel by the connection
-	channel, err := conn.Channel()
+	p.channel, err = p.conn.Channel()
 	if err != nil {
 		return err
 	}
-	p.channel = channel
+	//p.channel = channel
 
 	// Sets the channel's exchange
-	err = channel.ExchangeDeclare(
+	err = p.channel.ExchangeDeclare(
 		exchange,     // name
 		exchangeType, // type
 		true,         // durable
@@ -231,7 +234,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	}
 
 	// Declaring a durable queue
-	q, err := channel.QueueDeclare(
+	q, err := p.channel.QueueDeclare(
 		broker.GenerateName(), // name
 		true,                  // durable
 		false,                 // delete when unused
@@ -246,7 +249,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	p.queue = &q
 
 	// Binding the queue to the exchange
-	err = channel.QueueBind(
+	err = p.channel.QueueBind(
 		q.Name,   // queue name
 		"",       // routing key
 		exchange, // exchange
@@ -258,7 +261,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 		return err
 	}
 
-	msgs, err := p.channel.Consume(
+	p.inbound, err = p.channel.Consume(
 		p.queue.Name, // queue
 		"",           // consumer
 		true,         // auto-ack
@@ -272,7 +275,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 		return err
 	}
 
-	p.inbound = msgs
+	//p.inbound = msgs
 	return nil
 }
 
@@ -338,7 +341,8 @@ func (bp *BrokerPeer) Teardown() {
 
 // NewBrokerPeer creates and returns a new Peer for communicating with AMQP
 func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
-	connectionURL := "amqp://" + settings.Username + ":" + settings.Password + "@" + settings.BrokerHost + ":" + settings.BrokerPort + "/"
+	connectionURL := "amqp://" + settings.Username + ":" + settings.Password + "@" +
+		settings.BrokerHost + ":" + settings.BrokerPort + "/"
 	m := sync.Mutex{}
 	c := sync.NewCond(&m)
 	nrReadyPeers := new(int)

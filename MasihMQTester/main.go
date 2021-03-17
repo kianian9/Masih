@@ -5,6 +5,7 @@ import (
 	"Masih/MasihMQTester/broker"
 	"Masih/MasihMQTester/broker/amqp"
 	"Masih/MasihMQTester/broker/kafka"
+	"Masih/MasihMQTester/broker/stan"
 	"flag"
 	"fmt"
 	"os"
@@ -15,16 +16,9 @@ import (
 )
 
 type peer interface {
-	// Initializes the broker connections
-	// Setups publishers and subscribers
-	//Setup()
-
+	// Setups publishers/subscribers connections
 	SetupPublishers() error
-
 	SetupSubscribers() error
-
-	// Starts one publisher to a defined topic (set by broker)
-	//Publish() ([]*broker.Publisher, error)
 
 	// Starts publishers to a defined topic (set by broker)
 	StartPublishers()
@@ -49,6 +43,7 @@ const (
 	defaultNumProducers = 1
 	defaultNumConsumers = 1
 	defaultQueueType    = "QUORUM"
+	defaultClusterID    = "stan"
 )
 
 // The supported message brokers
@@ -76,6 +71,7 @@ func main() {
 		producers   = flag.Uint("producers", defaultNumProducers, "number of producers per host")
 		consumers   = flag.Uint("consumers", defaultNumConsumers, "number of consumers per host")
 		queueType   = flag.String("queueType", defaultQueueType, "queue type for amqp brokers")
+		clusterID   = flag.String("clusterID", defaultClusterID, "cluster id for nats streaming brokers")
 	)
 
 	flag.Parse()
@@ -108,6 +104,7 @@ func main() {
 		Producers:   *producers,
 		Consumers:   *consumers,
 		QueueType:   *queueType,
+		ClusterID:   *clusterID,
 	}
 
 	fmt.Println("BrokerName: ", brokerSetting.BrokerName)
@@ -173,7 +170,7 @@ func printSummary(settings broker.MQSettings, elapsed time.Duration) {
 	msgRecv := int(settings.NumMessages)
 	dataSentKB := (msgSent * int(settings.MessageSize)) / 1000
 	dataRecvKB := (msgRecv * int(settings.MessageSize)) / 1000
-	fmt.Println("\nTEST SUMMARY\n")
+	fmt.Printf("\nTEST SUMMARY\n")
 	fmt.Printf("Time Elapsed:       %s\n", elapsed.String())
 	fmt.Printf("Broker:             %s (%s)\n", settings.BrokerName, settings.BrokerHost)
 	fmt.Printf("Number Publishers:  %d\n", settings.Producers)
@@ -206,11 +203,8 @@ func newBrokerPeer(brokerSettings broker.MQSettings) peer {
 	case Kafka:
 		return kafka.NewBrokerPeer(brokerSettings)
 	case STAN:
-		return nil
-		//return nil, nil
-
+		return stan.NewBrokerPeer(brokerSettings)
 	default:
 		return nil
-		//return nil, fmt.Errorf("Invalid broker: %s", brokerSettings.BrokerName)
 	}
 }
