@@ -2,10 +2,14 @@ package main
 
 // TODO: FIX IMPORT TO github...
 import (
-	"Masih/MasihMQTester/broker"
-	"Masih/MasihMQTester/broker/amqp"
-	"Masih/MasihMQTester/broker/kafka"
-	"Masih/MasihMQTester/broker/stan"
+	//"Masih/MasihMQTester/broker"
+	"github.com/kianian9/Masih/masih/broker"
+	//"Masih/MasihMQTester/broker/amqp"
+	"github.com/kianian9/Masih/masih/broker/amqp"
+	"github.com/kianian9/Masih/masih/broker/kafka"
+	"github.com/kianian9/Masih/masih/broker/stan"
+	//"Masih/MasihMQTester/broker/kafka"
+	//"Masih/MasihMQTester/broker/stan"
 	"flag"
 	"fmt"
 	"os"
@@ -165,21 +169,20 @@ func main() {
 }
 
 func printSummary(settings broker.MQSettings, elapsed time.Duration) {
-	//nrPeers := settings.Consumers + settings.Producers
 	msgSent := int(settings.NumMessages)
-	msgRecv := int(settings.NumMessages)
+	msgRecv := int(settings.NumMessages) * int(settings.Consumers)
 	dataSentKB := (msgSent * int(settings.MessageSize)) / 1000
 	dataRecvKB := (msgRecv * int(settings.MessageSize)) / 1000
 	fmt.Printf("\nTEST SUMMARY\n")
-	fmt.Printf("Time Elapsed:       %s\n", elapsed.String())
-	fmt.Printf("Broker:             %s (%s)\n", settings.BrokerName, settings.BrokerHost)
-	fmt.Printf("Number Publishers:  %d\n", settings.Producers)
-	fmt.Printf("Number Subscribers: %d\n", settings.Consumers)
-	fmt.Printf("Messages produced:  %d\n", msgSent)
-	fmt.Printf("Messages consumed:  %d\n", msgRecv)
-	fmt.Printf("Bytes per message:  %d\n", settings.MessageSize)
-	fmt.Printf("Data produced (KB): %d\n", dataSentKB)
-	fmt.Printf("Data consumed (KB): %d\n", dataRecvKB)
+	fmt.Printf("Time Elapsed:       	     %s\n", elapsed.String())
+	fmt.Printf("Broker:             	     %s (%s)\n", settings.BrokerName, settings.BrokerHost)
+	fmt.Printf("Number Publishers:  	     %d\n", settings.Producers)
+	fmt.Printf("Number Subscribers: 	     %d\n", settings.Consumers)
+	fmt.Printf("Total messages produced:  	 %d\n", msgSent)
+	fmt.Printf("Total messages consumed:  	 %d\n", msgRecv)
+	fmt.Printf("Bytes per message:  	     %d\n", settings.MessageSize)
+	fmt.Printf("Total data produced (KB): 	 %d\n", dataSentKB)
+	fmt.Printf("Total data consumed (KB): 	 %d\n", dataRecvKB)
 	fmt.Println("")
 }
 

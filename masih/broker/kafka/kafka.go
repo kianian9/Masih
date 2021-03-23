@@ -1,38 +1,33 @@
-package stan
+package kafka
 
-// TODO: FIX IMPORT TO github...
 import (
-	"Masih/MasihMQTester/broker"
+	//"Masih/MasihMQTester/broker"
+	"github.com/kianian9/Masih/masih/broker"
 	"fmt"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/stan.go"
+	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-// Peer stores specific NATS/STAN broker connection information
+// Peer stores specific Kafka broker connection information
 type Peer struct {
-	id              int
-	clusterID       string
-	natsConnection  *nats.Conn
-	stanConnection  stan.Conn
-	ackHandler      func(ackedNuid string, err error)
+	producer        *kafka.Producer
+	consumer        *kafka.Consumer
 	send            chan []byte
-	subscription    stan.Subscription
-	recv            chan []byte
 	errors          chan error
 	done            chan bool
 	numMessages     uint
 	messageSize     uint64
 	messagesFlushed chan bool
+	brokersDown     chan bool
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
 type BrokerPeer struct {
 	connectionURL string
-	clusterID     string
 	consumers     int
 	producers     int
 	messageSize   uint64
@@ -46,7 +41,6 @@ type BrokerPeer struct {
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
-
 	if bp.producers > 0 {
 		// Calculate nr messages to publish per publisher
 		numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
@@ -54,16 +48,15 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				id:              i,
-				clusterID:       bp.clusterID,
-				natsConnection:  nil,
-				stanConnection:  nil,
+				producer:        nil,
+				consumer:        nil,
 				send:            make(chan []byte),
 				errors:          make(chan error, 1),
 				done:            make(chan bool),
 				numMessages:     bp.numMessages,
 				messageSize:     bp.messageSize,
 				messagesFlushed: make(chan bool),
+				brokersDown:     make(chan bool),
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -94,11 +87,12 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
 		subscriberPeer := &Peer{
-			id:             i,
-			clusterID:      bp.clusterID,
-			natsConnection: nil,
-			stanConnection: nil,
-			recv:           make(chan []byte),
+			producer:    nil,
+			consumer:    nil,
+			send:        nil,
+			errors:      nil,
+			done:        nil,
+			brokersDown: make(chan bool),
 		}
 		subscriber := &broker.Subscriber{
 			PeerOperations: subscriberPeer,
@@ -124,27 +118,55 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	return nil
 }
 
-// ACKhandler for produced messages
-func (p *Peer) ACKHandler() {
-	p.ackHandler = func(ackedNuid string, err error) {
-		if err != nil {
-			p.errors <- err
+// Delivery report handler for produced messages
+func (p *Peer) HandleErrors() {
+	go func() {
+		brokersChecked := false
+		for {
+			// Small wait first time for detecting any connection issues
+			time.Sleep(1 * time.Second)
+			if len(p.producer.Events()) == 0 && !brokersChecked {
+				brokersChecked = true
+				p.brokersDown <- false
+			}
+			for e := range p.producer.Events() {
+				switch ev := e.(type) {
+
+				case *kafka.Message:
+					if ev.TopicPartition.Error != nil {
+						p.errors <- ev.TopicPartition.Error
+					}
+				case kafka.Error:
+					if ev.Code() == kafka.ErrAllBrokersDown {
+						p.errors <- ev
+						p.brokersDown <- true
+					}
+				}
+			}
+			if <-p.done {
+				return
+			}
 		}
-	}
+
+	}()
 }
 
 // Goroutine which fetch messages from send-channel and publish them
 func (p *Peer) SetupPublishRoutine() {
+	topic := broker.Topic
 	go func() {
+		counter := 0
 		for {
 			select {
 			case msg := <-p.send:
-				_, err := p.stanConnection.PublishAsync(broker.Topic, msg, p.ackHandler) // returns immediately
-				if err != nil {
-					p.errors <- err
-				}
-
+				p.producer.Produce(&kafka.Message{
+					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+					Value:          msg,
+				}, nil)
+				counter++
 			case <-p.done:
+				// Waiting up to 10 minutes until all messages are successfully delivered
+				p.producer.Flush(600 * 1000)
 				p.messagesFlushed <- true
 				return
 			}
@@ -173,27 +195,40 @@ func (p *Peer) DeliveredChannel() <-chan bool {
 }
 
 func (p *Peer) ReceiveMessage() ([]byte, error) {
-	message := <-p.recv
-	return message, nil
+	// Waiting up to 10 seconds for a message to be received
+	msg, err := p.consumer.ReadMessage(10 * time.Second)
+	if msg != nil && msg.Value != nil {
+		return msg.Value, err
+	}
+	return nil, err
 }
+
+// TODO: Fix that publisher creates topic before subscriber trying to subcribe to it
 
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	var err error = nil
-	// Connecting to the NATS broker
-	p.natsConnection, err = nats.Connect(connectionURL)
+	// Connecting to the broker
+	nrMaxBufferedMsgs := strconv.FormatUint(uint64(p.numMessages), 10)
+	maxBufferSizeInKB := strconv.FormatUint((uint64(p.numMessages)*p.messageSize)/1000, 10)
+	p.producer, err = kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers":            connectionURL,
+		"acks":                         "all",
+		"queue.buffering.max.messages": nrMaxBufferedMsgs,
+		"queue.buffering.max.kbytes":   maxBufferSizeInKB,
+	})
+
 	if err != nil {
 		return err
 	}
+	//p.producer = producer
 
-	// Setting streaming connection and its preferences
-	clientID := "producer" + strconv.Itoa(p.id)
-	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
-		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
-		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
-			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
-		}))
-	if err != nil {
-		return err
+	p.HandleErrors()
+
+	// Check for successful broker connection
+	if <-p.brokersDown {
+		if err = <-p.errors; err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -201,26 +236,21 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 
 func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	var err error = nil
-	// Connecting to the broker
-	p.natsConnection, err = nats.Connect(connectionURL)
-	if err != nil {
-		return err
-	}
-
-	// Setting streaming connection and its preferences
-	clientID := "subscriber" + strconv.Itoa(p.id)
-	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
-		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
-		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
-			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
-		}))
-	if err != nil {
-		return err
-	}
-
-	p.subscription, err = p.stanConnection.Subscribe(broker.Topic, func(m *stan.Msg) {
-		p.recv <- m.Data
+	// Connecting to the broker, with unique groupIds for receiving all records
+	p.consumer, err = kafka.NewConsumer(&kafka.ConfigMap{
+		"bootstrap.servers":             connectionURL,
+		"group.id":                      broker.GenerateName(),
+		"enable.auto.commit":            "true",
+		"auto.commit.interval.ms":       "100",
+		"auto.offset.reset":             "earliest",
+		"partition.assignment.strategy": "roundrobin",
 	})
+	if err != nil {
+		return err
+	}
+	//p.consumer = consumer
+
+	err = p.consumer.SubscribeTopics([]string{broker.Topic}, nil)
 	if err != nil {
 		return err
 	}
@@ -274,20 +304,24 @@ func (bp *BrokerPeer) Teardown() {
 	// Closing publisher sockets
 	for _, element := range bp.publisher {
 		peer := element.PeerOperations.(*Peer)
-		peer.stanConnection.Close()
+		peer.producer.Close()
+
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
-		peer.subscription.Unsubscribe()
-		peer.stanConnection.Close()
+		err := peer.consumer.Close()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Subscriber %d failed to close socket\n", element.Id)
+		}
 	}
 
 }
 
 // NewPeer creates and returns a new Peer for communicating with Kafka
 func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
-	connectionURL := "nats://" + strings.Split(settings.BrokerHost, ":")[0] + ":" + settings.BrokerPort
+	connectionURL := strings.Split(settings.BrokerHost, ":")[0] + ":" + settings.BrokerPort
+
 	m := sync.Mutex{}
 	c := sync.NewCond(&m)
 	nrReadyPeers := new(int)
@@ -297,7 +331,6 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 
 	return &BrokerPeer{
 		connectionURL: connectionURL,
-		clusterID:     settings.ClusterID,
 		consumers:     int(settings.Consumers),
 		producers:     int(settings.Producers),
 		messageSize:   settings.MessageSize,

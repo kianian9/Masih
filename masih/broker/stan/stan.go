@@ -1,35 +1,39 @@
-package amqp
+package stan
 
 // TODO: FIX IMPORT TO github...
 import (
-	"Masih/MasihMQTester/broker"
+	//"Masih/MasihMQTester/broker"
+	"github.com/kianian9/Masih/masih/broker"
 	"fmt"
-	"github.com/streadway/amqp"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-const (
-	exchange     = "logs"
-	exchangeType = "fanout"
-)
-
-// Peer stores specific AMQP broker connection information
+// Peer stores specific NATS/STAN broker connection information
 type Peer struct {
-	conn            *amqp.Connection
-	queue           *amqp.Queue
-	channel         *amqp.Channel
-	inbound         <-chan amqp.Delivery
+	id              int
+	clusterID       string
+	natsConnection  *nats.Conn
+	stanConnection  stan.Conn
+	ackHandler      func(ackedNuid string, err error)
 	send            chan []byte
+	subscription    stan.Subscription
+	recv            chan []byte
 	errors          chan error
 	done            chan bool
+	numMessages     uint
+	messageSize     uint64
 	messagesFlushed chan bool
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
 type BrokerPeer struct {
 	connectionURL string
-	queueType     string
+	clusterID     string
 	consumers     int
 	producers     int
 	messageSize   uint64
@@ -43,37 +47,41 @@ type BrokerPeer struct {
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
-	// Calculate nr messages to publish per publisher
-	numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
+	if bp.producers > 0 {
+		// Calculate nr messages to publish per publisher
+		numMessPubArr := broker.DividePeerMessages(bp.producers, bp.numMessages)
 
-	// Create publishers
-	for i := 1; i <= bp.producers; i++ {
-		publisherPeer := &Peer{
-			conn:            nil,
-			queue:           nil,
-			channel:         nil,
-			inbound:         nil,
-			send:            make(chan []byte),
-			errors:          make(chan error, 1),
-			done:            make(chan bool),
-			messagesFlushed: make(chan bool),
-		}
-		publisher := &broker.Publisher{
-			PeerOperations:      publisherPeer,
-			Id:                  i,
-			NrMessagesToPublish: numMessPubArr[i-1],
-			MessageSize:         bp.messageSize,
-			SyncMutex:           bp.syncMutex,
-			SyncCond:            bp.syncCond,
-			NrDonePeers:         bp.nrDonePeers,
-			NrReadyPeers:        bp.nrReadyPeers,
-		}
-		bp.publisher[i-1] = publisher
+		// Create publishers
+		for i := 1; i <= bp.producers; i++ {
+			publisherPeer := &Peer{
+				id:              i,
+				clusterID:       bp.clusterID,
+				natsConnection:  nil,
+				stanConnection:  nil,
+				send:            make(chan []byte),
+				errors:          make(chan error, 1),
+				done:            make(chan bool),
+				numMessages:     bp.numMessages,
+				messageSize:     bp.messageSize,
+				messagesFlushed: make(chan bool),
+			}
+			publisher := &broker.Publisher{
+				PeerOperations:      publisherPeer,
+				Id:                  i,
+				NrMessagesToPublish: numMessPubArr[i-1],
+				MessageSize:         bp.messageSize,
+				SyncMutex:           bp.syncMutex,
+				SyncCond:            bp.syncCond,
+				NrDonePeers:         bp.nrDonePeers,
+				NrReadyPeers:        bp.nrReadyPeers,
+			}
+			bp.publisher[i-1] = publisher
 
-		// Setup publisher connection
-		err := publisherPeer.SetupPublisherConnection(bp.connectionURL)
-		if err != nil {
-			return err
+			// Setup publisher connection
+			err := publisherPeer.SetupPublisherConnection(bp.connectionURL)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -86,13 +94,11 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
 		subscriberPeer := &Peer{
-			conn:    nil,
-			queue:   nil,
-			channel: nil,
-			inbound: nil,
-			send:    nil,
-			errors:  nil,
-			done:    nil,
+			id:             i,
+			clusterID:      bp.clusterID,
+			natsConnection: nil,
+			stanConnection: nil,
+			recv:           make(chan []byte),
 		}
 		subscriber := &broker.Subscriber{
 			PeerOperations: subscriberPeer,
@@ -109,7 +115,7 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 		bp.subscriber[i-1] = subscriber
 
 		// Setup subscriber connection
-		err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL, bp.queueType)
+		err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL)
 		if err != nil {
 			return err
 		}
@@ -118,21 +124,26 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	return nil
 }
 
+// ACKhandler for produced messages
+func (p *Peer) ACKHandler() {
+	p.ackHandler = func(ackedNuid string, err error) {
+		if err != nil {
+			p.errors <- err
+		}
+	}
+}
+
 // Goroutine which fetch messages from send-channel and publish them
 func (p *Peer) SetupPublishRoutine() {
 	go func() {
 		for {
 			select {
 			case msg := <-p.send:
-				if err := p.channel.Publish(
-					exchange, // exchange
-					"",       // routing key
-					false,    // mandatory
-					false,    // immediate
-					amqp.Publishing{Body: msg},
-				); err != nil {
+				_, err := p.stanConnection.PublishAsync(broker.Topic, msg, p.ackHandler) // returns immediately
+				if err != nil {
 					p.errors <- err
 				}
+
 			case <-p.done:
 				p.messagesFlushed <- true
 				return
@@ -146,12 +157,12 @@ func (p *Peer) SendChannel() chan<- []byte {
 	return p.send
 }
 
-// Errors returns the channel on which the peer sends publish errors.
+// ErrorChannel returns the channel on which the peer sends publish errors.
 func (p *Peer) ErrorChannel() <-chan error {
 	return p.errors
 }
 
-// Done signals to the peer that message publishing has completed.
+// DoneChannel signals to the peer that message publishing has completed.
 func (p *Peer) DoneChannel() {
 	p.done <- true
 }
@@ -162,35 +173,25 @@ func (p *Peer) DeliveredChannel() <-chan bool {
 }
 
 func (p *Peer) ReceiveMessage() ([]byte, error) {
-	message := <-p.inbound
-	return message.Body, nil
+	message := <-p.recv
+	return message, nil
 }
 
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	var err error = nil
-	// Connecting to the broker
-	p.conn, err = amqp.Dial(connectionURL)
+	// Connecting to the NATS broker
+	p.natsConnection, err = nats.Connect(connectionURL)
 	if err != nil {
 		return err
 	}
-	//p.conn = conn
 
-	p.channel, err = p.conn.Channel()
-	if err != nil {
-		return err
-	}
-	//p.channel = channel
-
-	// Sets the channel's exchange
-	err = p.channel.ExchangeDeclare(
-		exchange,     // name
-		exchangeType, // type
-		true,         // durable
-		false,        // auto-deleted
-		false,        // internal
-		false,        // no-wait
-		nil,          // arguments
-	)
+	// Setting streaming connection and its preferences
+	clientID := "producer" + strconv.Itoa(p.id)
+	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
+		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
+		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
+			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
+		}))
 	if err != nil {
 		return err
 	}
@@ -198,84 +199,32 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	return nil
 }
 
-func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error {
+func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	var err error = nil
 	// Connecting to the broker
-	p.conn, err = amqp.Dial(connectionURL)
-	if err != nil {
-		return err
-	}
-	//p.conn = conn
-
-	// Creates a channel by the connection
-	p.channel, err = p.conn.Channel()
-	if err != nil {
-		return err
-	}
-	//p.channel = channel
-
-	// Sets the channel's exchange
-	err = p.channel.ExchangeDeclare(
-		exchange,     // name
-		exchangeType, // type
-		true,         // durable
-		false,        // auto-deleted
-		false,        // internal
-		false,        // no-wait
-		nil,          // arguments
-	)
+	p.natsConnection, err = nats.Connect(connectionURL)
 	if err != nil {
 		return err
 	}
 
-	args := make(amqp.Table)
-	if strings.EqualFold(broker.QUOROM_QUEUE, queueType) {
-		args["x-queue-type"] = "quorum"
-	}
-
-	// Declaring a durable queue
-	q, err := p.channel.QueueDeclare(
-		broker.GenerateName(), // name
-		true,                  // durable
-		false,                 // delete when unused
-		false,                 // exclusive
-		false,                 // no-wait
-		args,                  // arguments
-	)
+	// Setting streaming connection and its preferences
+	clientID := "subscriber" + strconv.Itoa(p.id)
+	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
+		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
+		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
+			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
+		}))
 	if err != nil {
 		return err
 	}
 
-	p.queue = &q
-
-	// Binding the queue to the exchange
-	err = p.channel.QueueBind(
-		q.Name,   // queue name
-		"",       // routing key
-		exchange, // exchange
-		false,
-		nil,
-	)
-
+	p.subscription, err = p.stanConnection.Subscribe(broker.Topic, func(m *stan.Msg) {
+		p.recv <- m.Data
+	})
 	if err != nil {
 		return err
 	}
 
-	p.inbound, err = p.channel.Consume(
-		p.queue.Name, // queue
-		"",           // consumer
-		true,         // auto-ack
-		false,        // exclusive
-		false,        // no-local
-		false,        // no-wait
-		nil,          // args
-	)
-
-	if err != nil {
-		return err
-	}
-
-	//p.inbound = msgs
 	return nil
 }
 
@@ -325,24 +274,20 @@ func (bp *BrokerPeer) Teardown() {
 	// Closing publisher sockets
 	for _, element := range bp.publisher {
 		peer := element.PeerOperations.(*Peer)
-		peer.channel.Close()
-		peer.conn.Close()
-
+		peer.stanConnection.Close()
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
-		peer.channel.Close()
-		peer.conn.Close()
-
+		peer.subscription.Unsubscribe()
+		peer.stanConnection.Close()
 	}
 
 }
 
-// NewBrokerPeer creates and returns a new Peer for communicating with AMQP
+// NewPeer creates and returns a new Peer for communicating with Kafka
 func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
-	connectionURL := "amqp://" + settings.Username + ":" + settings.Password + "@" +
-		settings.BrokerHost + ":" + settings.BrokerPort + "/"
+	connectionURL := "nats://" + strings.Split(settings.BrokerHost, ":")[0] + ":" + settings.BrokerPort
 	m := sync.Mutex{}
 	c := sync.NewCond(&m)
 	nrReadyPeers := new(int)
@@ -352,7 +297,7 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 
 	return &BrokerPeer{
 		connectionURL: connectionURL,
-		queueType:     settings.QueueType,
+		clusterID:     settings.ClusterID,
 		consumers:     int(settings.Consumers),
 		producers:     int(settings.Producers),
 		messageSize:   settings.MessageSize,

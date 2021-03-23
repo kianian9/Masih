@@ -1,4 +1,4 @@
-module Masih/MasihMQTester
+module Masih/masih
 
 go 1.15
 
