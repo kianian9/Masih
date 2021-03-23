@@ -1,10 +1,8 @@
 package stan
 
-// TODO: FIX IMPORT TO github...
 import (
-	//"Masih/MasihMQTester/broker"
-	"github.com/kianian9/Masih/masih/broker"
 	"fmt"
+	"github.com/kianian9/Masih/masih/broker"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/stan.go"
 	"os"

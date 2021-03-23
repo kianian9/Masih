@@ -1,10 +1,8 @@
 package amqp
 
-// TODO: FIX IMPORT TO github...
 import (
-	//"Masih/MasihMQTester/broker"
-	"github.com/kianian9/Masih/masih/broker"
 	"fmt"
+	"github.com/kianian9/Masih/masih/broker"
 	"github.com/streadway/amqp"
 	"strings"
 	"sync"

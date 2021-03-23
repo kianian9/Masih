@@ -1,17 +1,12 @@
 package main
 
-// TODO: FIX IMPORT TO github...
 import (
-	//"Masih/MasihMQTester/broker"
+	"flag"
+	"fmt"
 	"github.com/kianian9/Masih/masih/broker"
-	//"Masih/MasihMQTester/broker/amqp"
 	"github.com/kianian9/Masih/masih/broker/amqp"
 	"github.com/kianian9/Masih/masih/broker/kafka"
 	"github.com/kianian9/Masih/masih/broker/stan"
-	//"Masih/MasihMQTester/broker/kafka"
-	//"Masih/MasihMQTester/broker/stan"
-	"flag"
-	"fmt"
 	"os"
 	"runtime"
 	"strconv"

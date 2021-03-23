@@ -1,4 +1,4 @@
-module Masih/masih
+module github.com/kianian9/Masih/masih
 
 go 1.15
 

@@ -76,25 +76,6 @@ func (publisher *Publisher) StartPublishing(nrPeers int) {
 			return
 		}
 	}
-
-	/*
-		endTime := time.Now().UnixNano()
-
-		ms := float32(endTime-startTime) / 1000000
-		publisher.Results = &Result{
-			PeerID:     publisher.Id,
-			Duration:   ms,
-			Throughput: 1000 * float32(publisher.NrMessagesToPublish) / ms,
-		}
-
-		fmt.Printf("\nPublisher id: %d has completed\n", publisher.Id)
-
-		publisher.SyncMutex.Lock()
-		*publisher.NrDonePeers += 1
-		publisher.SyncCond.Signal()
-		publisher.SyncMutex.Unlock()
-
-	*/
 }
 
 func (publisher *Publisher) saveResultsAndNotify(startTime int64) {
