@@ -75,13 +75,7 @@ func main() {
 
 	flag.Parse()
 
-	// Checking if given broker is one of the supported ones
-	if !strings.Contains(brokerList(), *brokerName) {
-		fmt.Fprintf(os.Stderr, "Error: The provided broker is not supported!\n")
-		os.Exit(1)
-	}
-
-	// Checking if the broker's port is a valid or not
+	// Checking if the broker's port is valid or not
 	if _, err := strconv.Atoi(*brokerPort); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: The provided port %q is not a valid port!\n", *brokerPort)
 		os.Exit(1)
@@ -105,27 +99,29 @@ func main() {
 		QueueType:   *queueType,
 		ClusterID:   *clusterID,
 	}
-	fmt.Println("******** Settings ********")
-	fmt.Println("BrokerName: ", brokerSetting.BrokerName)
-	fmt.Println("Host: ", brokerSetting.BrokerHost)
-	fmt.Println("BrokerPort: ", brokerSetting.BrokerPort)
-	fmt.Println("Username: ", brokerSetting.Username)
-	fmt.Println("Password: ", brokerSetting.Password)
-	fmt.Println("MessageSize: ", brokerSetting.MessageSize)
-	fmt.Println("Num Messages: ", brokerSetting.NumMessages)
-	fmt.Println("Nr Producers: ", brokerSetting.Producers)
-	fmt.Println("Nr Consumers: ", brokerSetting.Consumers)
-	fmt.Println("Queue type: ", brokerSetting.QueueType)
-	fmt.Printf("**************************\n\n")
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	// Setups broker data needed for connecting
 	brokerPeer := newBrokerPeer(brokerSetting)
 	if brokerPeer == nil {
-		fmt.Fprintf(os.Stderr, "Error: Invalid broker: %s\n", *brokerName)
+		fmt.Fprintf(os.Stderr, "Error: The provided broker is not supported!\n")
 		os.Exit(1)
 	}
+
+	fmt.Println("************************ Settings ************************")
+	fmt.Println("BrokerName:           ", brokerSetting.BrokerName)
+	fmt.Println("Host:                 ", brokerSetting.BrokerHost)
+	fmt.Println("BrokerPort:           ", brokerSetting.BrokerPort)
+	fmt.Println("Username[RabbitMQ]:   ", brokerSetting.Username)
+	fmt.Println("Password[RabbitMQ]:   ", brokerSetting.Password)
+	fmt.Println("MessageSize:          ", brokerSetting.MessageSize)
+	fmt.Println("Num Messages:         ", brokerSetting.NumMessages)
+	fmt.Println("Nr Producers:         ", brokerSetting.Producers)
+	fmt.Println("Nr Consumers:         ", brokerSetting.Consumers)
+	fmt.Println("Queue type[RabbitMQ]: ", brokerSetting.QueueType)
+	fmt.Println("Cluster ID[STAN]:     ", brokerSetting.ClusterID)
+	fmt.Printf("**********************************************************\n\n")
 
 	// Creates publishers and subscribers for the broker
 	err := brokerPeer.SetupPublishers()
@@ -196,7 +192,7 @@ func brokerList() string {
 
 func newBrokerPeer(brokerSettings broker.MQSettings) peer {
 
-	switch brokerSettings.BrokerName {
+	switch strings.ToLower(brokerSettings.BrokerName) {
 	case RabbitMQ:
 		return amqp.NewBrokerPeer(brokerSettings)
 	case Kafka:
