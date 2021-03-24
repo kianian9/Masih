@@ -49,11 +49,8 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 	var nrConsumedMessages uint = 0
 	latencies := hdrhistogram.New(0, maxRecordableLatencyMS, sigFigs)
 	subscriber.Started = time.Now().UnixNano()
-	messSent := 0
-	t1 := time.Now().UnixNano() / 1000000000
 	for nrConsumedMessages < subscriber.NumMessages {
 		message, err := subscriber.ReceiveMessage()
-
 		now := time.Now().UnixNano()
 		if err != nil {
 			log.Printf("Subscriber error: %s", err.Error())
@@ -63,12 +60,6 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 		then, _ := binary.Varint(message)
 		latencies.RecordValue((now - then) / 1000000)
 		nrConsumedMessages += 1
-		t2 := time.Now().UnixNano() / 1000000000
-		if t2-t1 >= 1 {
-			fmt.Println("Throughput Sub(mess/sec): ", (int(nrConsumedMessages) - messSent))
-			messSent = int(nrConsumedMessages)
-			t1 = t2
-		}
 	}
 	subscriber.Stopped = time.Now().UnixNano()
 	durationMS := float32(subscriber.Stopped-subscriber.Started) / 1000000

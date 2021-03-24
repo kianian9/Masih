@@ -105,7 +105,7 @@ func main() {
 		QueueType:   *queueType,
 		ClusterID:   *clusterID,
 	}
-
+	fmt.Println("******** Settings ********")
 	fmt.Println("BrokerName: ", brokerSetting.BrokerName)
 	fmt.Println("Host: ", brokerSetting.BrokerHost)
 	fmt.Println("BrokerPort: ", brokerSetting.BrokerPort)
@@ -116,6 +116,7 @@ func main() {
 	fmt.Println("Nr Producers: ", brokerSetting.Producers)
 	fmt.Println("Nr Consumers: ", brokerSetting.Consumers)
 	fmt.Println("Queue type: ", brokerSetting.QueueType)
+	fmt.Printf("**************************\n\n")
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 

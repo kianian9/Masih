@@ -51,21 +51,12 @@ func (publisher *Publisher) StartPublishing(nrPeers int) {
 	defer publisher.saveResultsAndNotify(startTime)
 	defer publisher.DoneChannel()
 
-	t1 := time.Now().UnixNano() / 1000000000
-	messSent := 0
 	// Publish messages until PublisherCounter == NumMessages
 	for nrPublishedMessages < publisher.NrMessagesToPublish {
 		// Puts the actual time in the message
 		binary.PutVarint(message, time.Now().UnixNano())
 		select {
-
 		case send <- message:
-			t2 := time.Now().UnixNano() / 1000000000
-			if t2-t1 >= 1 {
-				fmt.Println("Throughput Pub(mess/sec): ", (int(nrPublishedMessages) - messSent))
-				messSent = int(nrPublishedMessages)
-				t1 = t2
-			}
 			nrPublishedMessages += 1
 			continue
 		case err := <-errors:
