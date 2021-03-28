@@ -49,10 +49,6 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				conn:            nil,
-				queue:           nil,
-				channel:         nil,
-				inbound:         nil,
 				send:            make(chan []byte),
 				errors:          make(chan error, 1),
 				done:            make(chan bool),
@@ -86,15 +82,7 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
-		subscriberPeer := &Peer{
-			conn:    nil,
-			queue:   nil,
-			channel: nil,
-			inbound: nil,
-			send:    nil,
-			errors:  nil,
-			done:    nil,
-		}
+		subscriberPeer := &Peer{}
 		subscriber := &broker.Subscriber{
 			PeerOperations: subscriberPeer,
 			Id:             i,
@@ -130,7 +118,10 @@ func (p *Peer) SetupPublishRoutine() {
 					"",       // routing key
 					false,    // mandatory
 					false,    // immediate
-					amqp.Publishing{Body: msg},
+					amqp.Publishing{
+						Body:         msg,
+						DeliveryMode: 2,
+					},
 				); err != nil {
 					p.errors <- err
 				}
@@ -174,13 +165,11 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	if err != nil {
 		return err
 	}
-	//p.conn = conn
 
 	p.channel, err = p.conn.Channel()
 	if err != nil {
 		return err
 	}
-	//p.channel = channel
 
 	// Sets the channel's exchange
 	err = p.channel.ExchangeDeclare(
@@ -206,14 +195,12 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	if err != nil {
 		return err
 	}
-	//p.conn = conn
 
 	// Creates a channel by the connection
 	p.channel, err = p.conn.Channel()
 	if err != nil {
 		return err
 	}
-	//p.channel = channel
 
 	// Sets the channel's exchange
 	err = p.channel.ExchangeDeclare(
@@ -230,9 +217,13 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	}
 
 	args := make(amqp.Table)
-	// If not quorum queue, it will by default create classic mirrored queue
+	// If not quorum queue, it will by default create a classic mirrored queue
+	// Both queue types will only use disk for storing messages
 	if strings.EqualFold(broker.QUOROM_QUEUE, queueType) {
 		args["x-queue-type"] = "quorum"
+		args["x-max-in-memory-length"] = 0
+	} else {
+		args["x-queue-mode"] = "lazy"
 	}
 
 	// Declaring a durable queue
@@ -247,7 +238,6 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	if err != nil {
 		return err
 	}
-
 	p.queue = &q
 
 	// Binding the queue to the exchange
@@ -277,7 +267,6 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 		return err
 	}
 
-	//p.inbound = msgs
 	return nil
 }
 

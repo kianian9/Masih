@@ -3,7 +3,9 @@ package kafka
 import (
 	"fmt"
 	"github.com/kianian9/Masih/masih/broker"
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	//"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
+	//"github.com/confluentinc/confluent-kafka-go/kafka"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ type Peer struct {
 	messageSize     uint64
 	messagesFlushed chan bool
 	brokersDown     chan bool
+	topic           string
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -37,6 +40,7 @@ type BrokerPeer struct {
 	syncCond      *sync.Cond
 	nrReadyPeers  *int
 	nrDonePeers   *int
+	topic         string
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -47,8 +51,6 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				producer:        nil,
-				consumer:        nil,
 				send:            make(chan []byte),
 				errors:          make(chan error, 1),
 				done:            make(chan bool),
@@ -56,6 +58,7 @@ func (bp *BrokerPeer) SetupPublishers() error {
 				messageSize:     bp.messageSize,
 				messagesFlushed: make(chan bool),
 				brokersDown:     make(chan bool),
+				topic:           bp.topic,
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -86,12 +89,8 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
 		subscriberPeer := &Peer{
-			producer:    nil,
-			consumer:    nil,
-			send:        nil,
-			errors:      nil,
-			done:        nil,
 			brokersDown: make(chan bool),
+			topic:       bp.topic,
 		}
 		subscriber := &broker.Subscriber{
 			PeerOperations: subscriberPeer,
@@ -152,17 +151,14 @@ func (p *Peer) HandleErrors() {
 
 // Goroutine which fetch messages from send-channel and publish them
 func (p *Peer) SetupPublishRoutine() {
-	topic := broker.Topic
 	go func() {
-		counter := 0
 		for {
 			select {
 			case msg := <-p.send:
 				p.producer.Produce(&kafka.Message{
-					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+					TopicPartition: kafka.TopicPartition{Topic: &p.topic, Partition: kafka.PartitionAny},
 					Value:          msg,
 				}, nil)
-				counter++
 			case <-p.done:
 				// Waiting up to 10 minutes until all messages are successfully delivered
 				p.producer.Flush(600 * 1000)
@@ -202,8 +198,6 @@ func (p *Peer) ReceiveMessage() ([]byte, error) {
 	return nil, err
 }
 
-// TODO: Fix that publisher creates topic before subscriber trying to subcribe to it
-
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	var err error = nil
 	// Connecting to the broker
@@ -214,12 +208,16 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 		"acks":                         "all",
 		"queue.buffering.max.messages": nrMaxBufferedMsgs,
 		"queue.buffering.max.kbytes":   maxBufferSizeInKB,
+
+		//"linger.ms": 			500,
+		//"batch.num.messages":		1000000,
+		//"request.timeout.ms":		100000,
+		//"enable.idempotence":		true,
 	})
 
 	if err != nil {
 		return err
 	}
-	//p.producer = producer
 
 	p.HandleErrors()
 
@@ -239,17 +237,31 @@ func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	p.consumer, err = kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers":             connectionURL,
 		"group.id":                      broker.GenerateName(),
-		"enable.auto.commit":            "true",
+		"enable.auto.commit":            true,
 		"auto.commit.interval.ms":       "100",
 		"auto.offset.reset":             "earliest",
 		"partition.assignment.strategy": "roundrobin",
+
+		// Not needed for confluent kafka go 1.4.2 version
+		//"allow.auto.create.topics":	 true,
+
+		//"session.timeout.ms":		 50000,
+		//"heartbeat.interval.ms":	 10000,
+
+		//
+		// TEMP SOLUTION: Setting high enough values to avoid Consumer group session timed out
+		// See (https://github.com/confluentinc/confluent-kafka-python/issues/1011)
+		// Could increase this later to be group.max.session.timeout.ms (increase brokers as well)
+		"session.timeout.ms":    1795000,
+		"heartbeat.interval.ms": 600000,
+		"max.poll.interval.ms":  5400000,
 	})
+
 	if err != nil {
 		return err
 	}
-	//p.consumer = consumer
 
-	err = p.consumer.SubscribeTopics([]string{broker.Topic}, nil)
+	err = p.consumer.SubscribeTopics([]string{p.topic}, nil)
 	if err != nil {
 		return err
 	}
@@ -340,5 +352,6 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 		syncCond:      c,
 		nrReadyPeers:  nrReadyPeers,
 		nrDonePeers:   nrDonePeers,
+		topic:         settings.Topic,
 	}
 }

@@ -6,14 +6,13 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/stan.go"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 )
 
 // Peer stores specific NATS/STAN broker connection information
 type Peer struct {
-	id              int
+	//id              int
 	clusterID       string
 	natsConnection  *nats.Conn
 	stanConnection  stan.Conn
@@ -26,6 +25,7 @@ type Peer struct {
 	numMessages     uint
 	messageSize     uint64
 	messagesFlushed chan bool
+	subject         string
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -42,6 +42,7 @@ type BrokerPeer struct {
 	syncCond      *sync.Cond
 	nrReadyPeers  *int
 	nrDonePeers   *int
+	subject       string
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -52,16 +53,14 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				id:              i,
 				clusterID:       bp.clusterID,
-				natsConnection:  nil,
-				stanConnection:  nil,
 				send:            make(chan []byte),
 				errors:          make(chan error, 1),
 				done:            make(chan bool),
 				numMessages:     bp.numMessages,
 				messageSize:     bp.messageSize,
 				messagesFlushed: make(chan bool),
+				subject:         bp.subject,
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -92,11 +91,9 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 	// Create subscribers
 	for i := 1; i <= bp.consumers; i++ {
 		subscriberPeer := &Peer{
-			id:             i,
-			clusterID:      bp.clusterID,
-			natsConnection: nil,
-			stanConnection: nil,
-			recv:           make(chan []byte),
+			clusterID: bp.clusterID,
+			recv:      make(chan []byte),
+			subject:   bp.subject,
 		}
 		subscriber := &broker.Subscriber{
 			PeerOperations: subscriberPeer,
@@ -137,7 +134,7 @@ func (p *Peer) SetupPublishRoutine() {
 		for {
 			select {
 			case msg := <-p.send:
-				_, err := p.stanConnection.PublishAsync(broker.Topic, msg, p.ackHandler) // returns immediately
+				_, err := p.stanConnection.PublishAsync(p.subject, msg, p.ackHandler) // returns immediately
 				if err != nil {
 					p.errors <- err
 				}
@@ -184,8 +181,7 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	}
 
 	// Setting streaming connection and its preferences
-	clientID := "producer" + strconv.Itoa(p.id)
-	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
+	p.stanConnection, err = stan.Connect(p.clusterID, broker.GenerateName(),
 		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
 		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
 			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
@@ -206,8 +202,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	}
 
 	// Setting streaming connection and its preferences
-	clientID := "subscriber" + strconv.Itoa(p.id)
-	p.stanConnection, err = stan.Connect(p.clusterID, clientID,
+	p.stanConnection, err = stan.Connect(p.clusterID, broker.GenerateName(),
 		stan.NatsConn(p.natsConnection), stan.Pings(10, 5),
 		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
 			fmt.Fprintf(os.Stderr, "Connection lost, reason: %v", reason)
@@ -216,7 +211,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 		return err
 	}
 
-	p.subscription, err = p.stanConnection.Subscribe(broker.Topic, func(m *stan.Msg) {
+	p.subscription, err = p.stanConnection.Subscribe(p.subject, func(m *stan.Msg) {
 		p.recv <- m.Data
 	})
 	if err != nil {
@@ -306,5 +301,6 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 		syncCond:      c,
 		nrReadyPeers:  nrReadyPeers,
 		nrDonePeers:   nrDonePeers,
+		subject:       settings.Topic,
 	}
 }

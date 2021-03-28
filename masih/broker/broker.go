@@ -11,7 +11,7 @@ import (
 const (
 	QUOROM_QUEUE  = "QUORUM"
 	CLASSIC_QUEUE = "CLASSIC"
-	Topic         = "test3"
+	//Topic         = "kian10"
 )
 
 type PeerOperations interface {
@@ -41,6 +41,7 @@ type MQSettings struct {
 	Consumers   uint
 	QueueType   string
 	ClusterID   string
+	Topic       string
 }
 
 type Result struct {
@@ -211,6 +212,7 @@ func (results *Results) PrintResults() {
 		}, consumerData)
 	}
 	fmt.Println("All units ms unless noted otherwise")
+	fmt.Printf("********************************************************** DONE **********************************************************\n\n\n")
 
 }
 

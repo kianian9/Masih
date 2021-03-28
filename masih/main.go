@@ -43,6 +43,7 @@ const (
 	defaultNumConsumers = 1
 	defaultQueueType    = "QUORUM"
 	defaultClusterID    = "stan"
+	defaultTopic        = "test"
 )
 
 // The supported message brokers
@@ -71,6 +72,7 @@ func main() {
 		consumers   = flag.Uint("consumers", defaultNumConsumers, "number of consumers per host")
 		queueType   = flag.String("queueType", defaultQueueType, "queue type for amqp brokers")
 		clusterID   = flag.String("clusterID", defaultClusterID, "cluster id for nats streaming brokers")
+		topic       = flag.String("topic", defaultTopic, "topic/subject used by publishers/subscribers")
 	)
 
 	flag.Parse()
@@ -98,6 +100,7 @@ func main() {
 		Consumers:   *consumers,
 		QueueType:   *queueType,
 		ClusterID:   *clusterID,
+		Topic:       *topic,
 	}
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -121,6 +124,7 @@ func main() {
 	fmt.Println("Nr Consumers:         ", brokerSetting.Consumers)
 	fmt.Println("Queue type[RabbitMQ]: ", brokerSetting.QueueType)
 	fmt.Println("Cluster ID[STAN]:     ", brokerSetting.ClusterID)
+	fmt.Println("Topic[Kafka/STAN]:    ", brokerSetting.Topic)
 	fmt.Printf("**********************************************************\n\n")
 
 	// Creates publishers and subscribers for the broker
@@ -166,15 +170,15 @@ func printSummary(settings broker.MQSettings, elapsed time.Duration) {
 	dataSentKB := (msgSent * int(settings.MessageSize)) / 1000
 	dataRecvKB := (msgRecv * int(settings.MessageSize)) / 1000
 	fmt.Printf("\nTEST SUMMARY\n")
-	fmt.Printf("Time Elapsed:       	     %s\n", elapsed.String())
-	fmt.Printf("Broker:             	     %s (%s)\n", settings.BrokerName, settings.BrokerHost)
-	fmt.Printf("Number Publishers:  	     %d\n", settings.Producers)
-	fmt.Printf("Number Subscribers: 	     %d\n", settings.Consumers)
-	fmt.Printf("Total messages produced:  	 %d\n", msgSent)
-	fmt.Printf("Total messages consumed:  	 %d\n", msgRecv)
-	fmt.Printf("Bytes per message:  	     %d\n", settings.MessageSize)
-	fmt.Printf("Total data produced (KB): 	 %d\n", dataSentKB)
-	fmt.Printf("Total data consumed (KB): 	 %d\n", dataRecvKB)
+	fmt.Printf("Time Elapsed:             %s\n", elapsed.String())
+	fmt.Printf("Broker:                   %s (%s)\n", settings.BrokerName, settings.BrokerHost)
+	fmt.Printf("Number Publishers:        %d\n", settings.Producers)
+	fmt.Printf("Number Subscribers:       %d\n", settings.Consumers)
+	fmt.Printf("Total messages produced:  %d\n", msgSent)
+	fmt.Printf("Total messages consumed:  %d\n", msgRecv)
+	fmt.Printf("Bytes per message:        %d\n", settings.MessageSize)
+	fmt.Printf("Total data produced (KB): %d\n", dataSentKB)
+	fmt.Printf("Total data consumed (KB): %d\n", dataRecvKB)
 	fmt.Println("")
 }
 

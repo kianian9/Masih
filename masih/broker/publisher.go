@@ -81,7 +81,7 @@ func (publisher *Publisher) saveResultsAndNotify(startTime int64) {
 		Throughput: 1000 * float32(publisher.NrMessagesToPublish) / ms,
 	}
 
-	fmt.Printf("\nPublisher id: %d has completed\n\n", publisher.Id)
+	fmt.Printf("\nPublisher id: %d has completed\n", publisher.Id)
 
 	publisher.SyncMutex.Lock()
 	*publisher.NrDonePeers += 1
