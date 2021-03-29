@@ -49,6 +49,7 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 	var nrConsumedMessages uint = 0
 	latencies := hdrhistogram.New(0, maxRecordableLatencyMS, sigFigs)
 	subscriber.Started = time.Now().UnixNano()
+
 	for nrConsumedMessages < subscriber.NumMessages {
 		message, err := subscriber.ReceiveMessage()
 		now := time.Now().UnixNano()

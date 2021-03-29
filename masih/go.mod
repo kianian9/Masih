@@ -4,7 +4,7 @@ go 1.15
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.1.0
-	github.com/confluentinc/confluent-kafka-go v1.4.2
+	github.com/Shopify/sarama v1.28.0
 	github.com/golang/protobuf v1.5.1 // indirect
 	github.com/nats-io/nats-server/v2 v2.2.0 // indirect
 	github.com/nats-io/nats-streaming-server v0.21.1 // indirect

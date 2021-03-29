@@ -12,20 +12,18 @@ import (
 
 // Peer stores specific NATS/STAN broker connection information
 type Peer struct {
-	//id              int
-	clusterID       string
-	natsConnection  *nats.Conn
-	stanConnection  stan.Conn
-	ackHandler      func(ackedNuid string, err error)
-	send            chan []byte
-	subscription    stan.Subscription
-	recv            chan []byte
-	errors          chan error
-	done            chan bool
-	numMessages     uint
-	messageSize     uint64
-	messagesFlushed chan bool
-	subject         string
+	clusterID      string
+	natsConnection *nats.Conn
+	stanConnection stan.Conn
+	ackHandler     func(ackedNuid string, err error)
+	send           chan []byte
+	subscription   stan.Subscription
+	recv           chan []byte
+	errors         chan error
+	done           chan bool
+	numMessages    uint
+	messageSize    uint64
+	subject        string
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -53,14 +51,13 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				clusterID:       bp.clusterID,
-				send:            make(chan []byte),
-				errors:          make(chan error, 1),
-				done:            make(chan bool),
-				numMessages:     bp.numMessages,
-				messageSize:     bp.messageSize,
-				messagesFlushed: make(chan bool),
-				subject:         bp.subject,
+				clusterID:   bp.clusterID,
+				send:        make(chan []byte),
+				errors:      make(chan error, 1),
+				done:        make(chan bool),
+				numMessages: bp.numMessages,
+				messageSize: bp.messageSize,
+				subject:     bp.subject,
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -140,7 +137,6 @@ func (p *Peer) SetupPublishRoutine() {
 				}
 
 			case <-p.done:
-				p.messagesFlushed <- true
 				return
 			}
 		}
@@ -160,11 +156,6 @@ func (p *Peer) ErrorChannel() <-chan error {
 // DoneChannel signals to the peer that message publishing has completed.
 func (p *Peer) DoneChannel() {
 	p.done <- true
-}
-
-// DeliveredChannel returns the channel on which the peer can check for delivery completion.
-func (p *Peer) DeliveredChannel() <-chan bool {
-	return p.messagesFlushed
 }
 
 func (p *Peer) ReceiveMessage() ([]byte, error) {

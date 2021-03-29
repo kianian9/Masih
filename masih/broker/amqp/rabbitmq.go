@@ -9,20 +9,21 @@ import (
 )
 
 const (
-	exchange     = "logs"
-	exchangeType = "fanout"
+	exchange      = "logs"
+	exchangeType  = "fanout"
+	QUOROM_QUEUE  = "QUORUM"
+	CLASSIC_QUEUE = "CLASSIC"
 )
 
 // Peer stores specific AMQP broker connection information
 type Peer struct {
-	conn            *amqp.Connection
-	queue           *amqp.Queue
-	channel         *amqp.Channel
-	inbound         <-chan amqp.Delivery
-	send            chan []byte
-	errors          chan error
-	done            chan bool
-	messagesFlushed chan bool
+	conn    *amqp.Connection
+	queue   *amqp.Queue
+	channel *amqp.Channel
+	inbound <-chan amqp.Delivery
+	send    chan []byte
+	errors  chan error
+	done    chan bool
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -49,10 +50,9 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				send:            make(chan []byte),
-				errors:          make(chan error, 1),
-				done:            make(chan bool),
-				messagesFlushed: make(chan bool),
+				send:   make(chan []byte),
+				errors: make(chan error, 1),
+				done:   make(chan bool),
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -126,7 +126,6 @@ func (p *Peer) SetupPublishRoutine() {
 					p.errors <- err
 				}
 			case <-p.done:
-				p.messagesFlushed <- true
 				return
 			}
 		}
@@ -146,11 +145,6 @@ func (p *Peer) ErrorChannel() <-chan error {
 // Done signals to the peer that message publishing has completed.
 func (p *Peer) DoneChannel() {
 	p.done <- true
-}
-
-// DeliveredChannel returns the channel on which the peer can check for delivery completion.
-func (p *Peer) DeliveredChannel() <-chan bool {
-	return p.messagesFlushed
 }
 
 func (p *Peer) ReceiveMessage() ([]byte, error) {
@@ -219,7 +213,7 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	args := make(amqp.Table)
 	// If not quorum queue, it will by default create a classic mirrored queue
 	// Both queue types will only use disk for storing messages
-	if strings.EqualFold(broker.QUOROM_QUEUE, queueType) {
+	if strings.EqualFold(QUOROM_QUEUE, queueType) {
 		args["x-queue-type"] = "quorum"
 		args["x-max-in-memory-length"] = 0
 	} else {
@@ -318,16 +312,13 @@ func (bp *BrokerPeer) Teardown() {
 		peer := element.PeerOperations.(*Peer)
 		peer.channel.Close()
 		peer.conn.Close()
-
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
 		peer.channel.Close()
 		peer.conn.Close()
-
 	}
-
 }
 
 // NewBrokerPeer creates and returns a new Peer for communicating with AMQP

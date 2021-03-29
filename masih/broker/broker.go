@@ -8,20 +8,12 @@ import (
 	"strconv"
 )
 
-const (
-	QUOROM_QUEUE  = "QUORUM"
-	CLASSIC_QUEUE = "CLASSIC"
-	//Topic         = "kian10"
-)
-
 type PeerOperations interface {
 	ReceiveMessage() ([]byte, error)
 	SetupPublishRoutine()
 	SendChannel() chan<- []byte
 	ErrorChannel() <-chan error
 	DoneChannel()
-	// Needed due to Kafka's Confluent Library
-	DeliveredChannel() <-chan bool
 }
 
 type Results struct {

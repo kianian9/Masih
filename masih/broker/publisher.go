@@ -70,8 +70,6 @@ func (publisher *Publisher) StartPublishing(nrPeers int) {
 }
 
 func (publisher *Publisher) saveResultsAndNotify(startTime int64) {
-	// Blocking until all messages are delivered
-	<-publisher.DeliveredChannel()
 	endTime := time.Now().UnixNano()
 
 	ms := float32(endTime-startTime) / 1000000

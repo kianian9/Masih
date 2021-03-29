@@ -1,30 +1,40 @@
 package kafka
 
 import (
+	"context"
 	"fmt"
+	"github.com/Shopify/sarama"
 	"github.com/kianian9/Masih/masih/broker"
-	//"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
-	"github.com/confluentinc/confluent-kafka-go/kafka"
-	//"github.com/confluentinc/confluent-kafka-go/kafka"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
+const (
+	kafkaVersion   = "2.7.0"
+	consumerOffset = sarama.OffsetOldest
+)
+
+// Consumer represents a Sarama consumer group consumer
+type Consumer struct {
+	ready chan bool
+	recv  chan []byte
+}
+
 // Peer stores specific Kafka broker connection information
 type Peer struct {
-	producer        *kafka.Producer
-	consumer        *kafka.Consumer
-	send            chan []byte
-	errors          chan error
-	done            chan bool
-	numMessages     uint
-	messageSize     uint64
-	messagesFlushed chan bool
-	brokersDown     chan bool
-	topic           string
+	client        sarama.Client
+	producer      sarama.AsyncProducer
+	consumerGroup sarama.ConsumerGroup
+	consumer      *Consumer
+	context       context.Context
+	send          chan []byte
+	errors        chan error
+	done          chan bool
+	numMessages   uint
+	messageSize   uint64
+	brokersDown   chan bool
+	topic         string
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -51,14 +61,13 @@ func (bp *BrokerPeer) SetupPublishers() error {
 		// Create publishers
 		for i := 1; i <= bp.producers; i++ {
 			publisherPeer := &Peer{
-				send:            make(chan []byte),
-				errors:          make(chan error, 1),
-				done:            make(chan bool),
-				numMessages:     bp.numMessages,
-				messageSize:     bp.messageSize,
-				messagesFlushed: make(chan bool),
-				brokersDown:     make(chan bool),
-				topic:           bp.topic,
+				send:        make(chan []byte),
+				errors:      make(chan error, 1),
+				done:        make(chan bool),
+				numMessages: bp.numMessages,
+				messageSize: bp.messageSize,
+				brokersDown: make(chan bool),
+				topic:       bp.topic,
 			}
 			publisher := &broker.Publisher{
 				PeerOperations:      publisherPeer,
@@ -111,62 +120,32 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 		if err != nil {
 			return err
 		}
-
 	}
 	return nil
 }
 
-// Delivery report handler for produced messages
-func (p *Peer) HandleErrors() {
-	go func() {
-		brokersChecked := false
-		for {
-			// Small wait first time for detecting any connection issues
-			time.Sleep(1 * time.Second)
-			if len(p.producer.Events()) == 0 && !brokersChecked {
-				brokersChecked = true
-				p.brokersDown <- false
-			}
-			for e := range p.producer.Events() {
-				switch ev := e.(type) {
-
-				case *kafka.Message:
-					if ev.TopicPartition.Error != nil {
-						p.errors <- ev.TopicPartition.Error
-					}
-				case kafka.Error:
-					if ev.Code() == kafka.ErrAllBrokersDown {
-						p.errors <- ev
-						p.brokersDown <- true
-					}
-				}
-			}
-			if <-p.done {
-				return
-			}
-		}
-
-	}()
-}
-
-// Goroutine which fetch messages from send-channel and publish them
 func (p *Peer) SetupPublishRoutine() {
 	go func() {
 		for {
 			select {
 			case msg := <-p.send:
-				p.producer.Produce(&kafka.Message{
-					TopicPartition: kafka.TopicPartition{Topic: &p.topic, Partition: kafka.PartitionAny},
-					Value:          msg,
-				}, nil)
+				if err := p.sendMessage(msg); err != nil {
+					p.errors <- err
+				}
 			case <-p.done:
-				// Waiting up to 10 minutes until all messages are successfully delivered
-				p.producer.Flush(600 * 1000)
-				p.messagesFlushed <- true
 				return
 			}
 		}
 	}()
+}
+
+func (p *Peer) sendMessage(message []byte) error {
+	select {
+	case p.producer.Input() <- &sarama.ProducerMessage{Topic: p.topic, Key: nil, Value: sarama.ByteEncoder(message)}:
+		return nil
+	case err := <-p.producer.Errors():
+		return err.Err
+	}
 }
 
 // Send returns a channel on which messages can be sent for publishing.
@@ -184,48 +163,62 @@ func (p *Peer) DoneChannel() {
 	p.done <- true
 }
 
-// DeliveredChannel returns the channel on which the peer can check for delivery completion.
-func (p *Peer) DeliveredChannel() <-chan bool {
-	return p.messagesFlushed
+func (p *Peer) ReceiveMessage() ([]byte, error) {
+	// Await till the consumer has received message
+	msg := <-p.consumer.recv
+	return msg, nil
 }
 
-func (p *Peer) ReceiveMessage() ([]byte, error) {
-	// Waiting up to 10 seconds for a message to be received
-	msg, err := p.consumer.ReadMessage(10 * time.Second)
-	if msg != nil && msg.Value != nil {
-		return msg.Value, err
+// Setup is run at the beginning of a new session, before ConsumeClaim
+func (consumer *Consumer) Setup(sarama.ConsumerGroupSession) error {
+	// Mark the consumer as ready
+	close(consumer.ready)
+	return nil
+}
+
+// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
+func (consumer *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
+// NOTE: The function itself is called within a goroutine
+func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for message := range claim.Messages() {
+		consumer.recv <- message.Value
+		session.MarkMessage(message, "")
 	}
-	return nil, err
+	return nil
 }
 
 func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	var err error = nil
 	// Connecting to the broker
-	nrMaxBufferedMsgs := strconv.FormatUint(uint64(p.numMessages), 10)
-	maxBufferSizeInKB := strconv.FormatUint((uint64(p.numMessages)*p.messageSize)/1000, 10)
-	p.producer, err = kafka.NewProducer(&kafka.ConfigMap{
-		"bootstrap.servers":            connectionURL,
-		"acks":                         "all",
-		"queue.buffering.max.messages": nrMaxBufferedMsgs,
-		"queue.buffering.max.kbytes":   maxBufferSizeInKB,
+	config := sarama.NewConfig()
+	kfVersion, err := sarama.ParseKafkaVersion(kafkaVersion)
+	if err != nil {
+		return err
+	}
+	config.Version = kfVersion
 
-		//"linger.ms": 			500,
-		//"batch.num.messages":		1000000,
-		//"request.timeout.ms":		100000,
-		//"enable.idempotence":		true,
-	})
+	// Disabling compressing
+	config.Producer.Compression = sarama.CompressionNone
 
+	// Wait for partition leader to ack message
+	config.Producer.RequiredAcks = sarama.WaitForLocal
+
+	// Setting Round Robin partitioning for publishing messages
+	config.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+
+	config.Net.DialTimeout = 2 * time.Second
+	p.client, err = sarama.NewClient([]string{connectionURL}, config)
 	if err != nil {
 		return err
 	}
 
-	p.HandleErrors()
-
-	// Check for successful broker connection
-	if <-p.brokersDown {
-		if err = <-p.errors; err != nil {
-			return err
-		}
+	p.producer, err = sarama.NewAsyncProducer([]string{connectionURL}, config)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -234,37 +227,42 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	var err error = nil
 	// Connecting to the broker, with unique groupIds for receiving all records
-	p.consumer, err = kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers":             connectionURL,
-		"group.id":                      broker.GenerateName(),
-		"enable.auto.commit":            true,
-		"auto.commit.interval.ms":       "100",
-		"auto.offset.reset":             "earliest",
-		"partition.assignment.strategy": "roundrobin",
+	config := sarama.NewConfig()
+	kfversion, err := sarama.ParseKafkaVersion(kafkaVersion)
+	if err != nil {
+		return err
+	}
+	config.Version = kfversion
 
-		// Not needed for confluent kafka go 1.4.2 version
-		//"allow.auto.create.topics":	 true,
+	// Using the Round Robin partition balance strategy
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
 
-		//"session.timeout.ms":		 50000,
-		//"heartbeat.interval.ms":	 10000,
+	// Consuming the earliest offset for the topic
+	config.Consumer.Offsets.Initial = consumerOffset
 
-		//
-		// TEMP SOLUTION: Setting high enough values to avoid Consumer group session timed out
-		// See (https://github.com/confluentinc/confluent-kafka-python/issues/1011)
-		// Could increase this later to be group.max.session.timeout.ms (increase brokers as well)
-		"session.timeout.ms":    1795000,
-		"heartbeat.interval.ms": 600000,
-		"max.poll.interval.ms":  5400000,
-	})
-
+	p.client, err = sarama.NewClient([]string{connectionURL}, config)
 	if err != nil {
 		return err
 	}
 
-	err = p.consumer.SubscribeTopics([]string{p.topic}, nil)
+	p.consumer = &Consumer{
+		ready: make(chan bool),
+		recv:  make(chan []byte),
+	}
+
+	p.consumerGroup, err = sarama.NewConsumerGroupFromClient(broker.GenerateName(), p.client)
 	if err != nil {
 		return err
 	}
+	p.context = context.Background()
+
+	go func() {
+		if err := p.consumerGroup.Consume(p.context, []string{p.topic}, p.consumer); err != nil {
+			return
+		}
+	}()
+	// Await till the consumer has been set up
+	<-p.consumer.ready
 
 	return nil
 }
@@ -307,7 +305,6 @@ func (bp *BrokerPeer) GetResults() *broker.Results {
 		PublisherResults:  publisherResults,
 		SubscriberResults: subscriberResults,
 	}
-
 }
 
 // Performs any broker-connection cleanup after test is done
@@ -316,23 +313,20 @@ func (bp *BrokerPeer) Teardown() {
 	for _, element := range bp.publisher {
 		peer := element.PeerOperations.(*Peer)
 		peer.producer.Close()
+		peer.client.Close()
 
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
-		err := peer.consumer.Close()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Subscriber %d failed to close socket\n", element.Id)
-		}
+		peer.consumerGroup.Close()
+		peer.client.Close()
 	}
-
 }
 
 // NewPeer creates and returns a new Peer for communicating with Kafka
 func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	connectionURL := strings.Split(settings.BrokerHost, ":")[0] + ":" + settings.BrokerPort
-
 	m := sync.Mutex{}
 	c := sync.NewCond(&m)
 	nrReadyPeers := new(int)
