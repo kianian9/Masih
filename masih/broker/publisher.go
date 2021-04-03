@@ -8,16 +8,27 @@ import (
 	"time"
 )
 
+const (
+	// Maximum bytes we will get behind before we start slowing down publishing.
+	maxBytesBehind = 1024 * 1024 * 2 // 2MB
+
+	// Time to delay publishing when we are behind.
+	delay = 1 * time.Millisecond
+)
+
 type Publisher struct {
 	PeerOperations
-	Id                  int
-	NrMessagesToPublish uint
-	MessageSize         uint64
-	Results             *Result
-	SyncMutex           *sync.Mutex
-	SyncCond            *sync.Cond
-	NrReadyPeers        *int
-	NrDonePeers         *int
+	Id                       int
+	NrMessagesToPublish      uint
+	MessageSize              uint64
+	Results                  *Result
+	SyncMutex                *sync.Mutex
+	SyncCond                 *sync.Cond
+	NrReadyPeers             *int
+	NrDonePeers              *int
+	SubNrConsumedMessagesArr []*uint
+	SubscriberDoneArr        []*bool
+	NrPublishers             int
 }
 
 func (publisher *Publisher) StartPublishing(nrPeers int) {
@@ -58,6 +69,38 @@ func (publisher *Publisher) StartPublishing(nrPeers int) {
 		select {
 		case send <- message:
 			nrPublishedMessages += 1
+
+			// Congestion control, minimizing producer throughput if
+			// consumers getting too far behind so they can catch up
+			var leastReceives *uint = nil
+			// Finding subscriber with least receives
+			publisher.SyncMutex.Lock()
+			for i := 0; i < len(publisher.SubNrConsumedMessagesArr); i++ {
+				subscriberMessageReceived := publisher.SubNrConsumedMessagesArr[i]
+				subscriberDone := publisher.SubscriberDoneArr[i]
+				if leastReceives == nil && !*subscriberDone {
+					leastReceives = subscriberMessageReceived
+				} else if !*subscriberDone && leastReceives != nil && *leastReceives > *subscriberMessageReceived {
+					leastReceives = subscriberMessageReceived
+				}
+			}
+			var val uint = 0
+			if leastReceives != nil {
+				val = *leastReceives
+			}
+			publisher.SyncMutex.Unlock()
+
+			if val != 0 {
+				// Approximately total amount of bytes published
+				approxBytesSent := uint64(nrPublishedMessages) * uint64(publisher.NrPublishers) * publisher.MessageSize
+				leastBytesReceived := uint64(val) * publisher.MessageSize
+
+				// If approx total amount of byte sent - threshold val is greater than
+				//  subscribers' received number of bytes, then slow down and let receiver bounce back
+				if approxBytesSent-maxBytesBehind > leastBytesReceived {
+					time.Sleep(delay)
+				}
+			}
 			continue
 		case err := <-errors:
 			// TODO: If a publish fails, a subscriber will probably deadlock.

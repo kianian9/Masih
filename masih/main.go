@@ -166,7 +166,7 @@ func main() {
 
 func printSummary(settings broker.MQSettings, elapsed time.Duration) {
 	msgSent := int(settings.NumMessages)
-	msgRecv := int(settings.NumMessages) * int(settings.Consumers)
+	msgRecv := int(settings.NumMessages)
 	dataSentKB := (msgSent * int(settings.MessageSize)) / 1000
 	dataRecvKB := (msgRecv * int(settings.MessageSize)) / 1000
 	fmt.Printf("\nTEST SUMMARY\n")

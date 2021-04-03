@@ -38,20 +38,20 @@ type MQSettings struct {
 
 type Result struct {
 	PeerID     int
-	Duration   float32         `json:"duration,omitempty"`
-	Throughput float32         `json:"throughput,omitempty"`
-	Latency    *latencyResults `json:"latency,omitempty"`
-	Err        string          `json:"error,omitempty"`
+	Duration   float32
+	Throughput float32
+	Latency    *latencyResults
+	Err        string
 }
 
 type latencyResults struct {
-	Min    int64   `json:"min"`
-	Q1     int64   `json:"q1"`
-	Q2     int64   `json:"q2"`
-	Q3     int64   `json:"q3"`
-	Max    int64   `json:"max"`
-	Mean   float64 `json:"mean"`
-	StdDev float64 `json:"std_dev"`
+	Min    int64
+	Q1     int64
+	Q2     int64
+	Q3     int64
+	Max    int64
+	Mean   float64
+	StdDev float64
 }
 
 func GenerateName() string {

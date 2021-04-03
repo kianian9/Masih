@@ -11,17 +11,19 @@ import (
 
 type Subscriber struct {
 	PeerOperations
-	Id           int
-	NumMessages  uint
-	MessageSize  int64
-	HasStarted   bool
-	Started      int64
-	Stopped      int64
-	Results      *Result
-	SyncMutex    *sync.Mutex
-	SyncCond     *sync.Cond
-	NrReadyPeers *int
-	NrDonePeers  *int
+	Id                  int
+	NrMessagesToConsume uint
+	MessageSize         int64
+	HasStarted          bool
+	Started             int64
+	Stopped             int64
+	Results             *Result
+	SyncMutex           *sync.Mutex
+	SyncCond            *sync.Cond
+	NrReadyPeers        *int
+	NrDonePeers         *int
+	NrMessagesConsumed  *uint
+	SubscriberDone      *bool
 }
 
 const (
@@ -46,11 +48,10 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 
 	fmt.Printf("Subscriber id: %d starting consuming...\n", subscriber.Id)
 
-	var nrConsumedMessages uint = 0
 	latencies := hdrhistogram.New(0, maxRecordableLatencyMS, sigFigs)
 	subscriber.Started = time.Now().UnixNano()
 
-	for nrConsumedMessages < subscriber.NumMessages {
+	for *subscriber.NrMessagesConsumed < subscriber.NrMessagesToConsume {
 		message, err := subscriber.ReceiveMessage()
 		now := time.Now().UnixNano()
 		if err != nil {
@@ -60,14 +61,16 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 		}
 		then, _ := binary.Varint(message)
 		latencies.RecordValue((now - then) / 1000000)
-		nrConsumedMessages += 1
+		subscriber.SyncMutex.Lock()
+		*subscriber.NrMessagesConsumed += 1
+		subscriber.SyncMutex.Unlock()
 	}
 	subscriber.Stopped = time.Now().UnixNano()
 	durationMS := float32(subscriber.Stopped-subscriber.Started) / 1000000
 	subscriber.Results = &Result{
 		PeerID:     subscriber.Id,
 		Duration:   durationMS,
-		Throughput: 1000 * float32(subscriber.NumMessages) / durationMS,
+		Throughput: 1000 * float32(subscriber.NrMessagesToConsume) / durationMS,
 		Latency: &latencyResults{
 			Min:    latencies.Min(),
 			Q1:     latencies.ValueAtQuantile(25),
@@ -85,5 +88,5 @@ func (subscriber *Subscriber) StartSubscribing(nrPeers int) {
 	*subscriber.NrDonePeers += 1
 	subscriber.SyncCond.Signal()
 	subscriber.SyncMutex.Unlock()
-
+	*subscriber.SubscriberDone = true
 }

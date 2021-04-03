@@ -28,19 +28,21 @@ type Peer struct {
 
 // BrokerPeer implements the peer interface for AMQP brokers
 type BrokerPeer struct {
-	connectionURL string
-	clusterID     string
-	consumers     int
-	producers     int
-	messageSize   uint64
-	numMessages   uint
-	publisher     []*broker.Publisher
-	subscriber    []*broker.Subscriber
-	syncMutex     *sync.Mutex
-	syncCond      *sync.Cond
-	nrReadyPeers  *int
-	nrDonePeers   *int
-	subject       string
+	connectionURL                  string
+	clusterID                      string
+	consumers                      int
+	producers                      int
+	messageSize                    uint64
+	numMessages                    uint
+	publisher                      []*broker.Publisher
+	subscriber                     []*broker.Subscriber
+	syncMutex                      *sync.Mutex
+	syncCond                       *sync.Cond
+	nrReadyPeers                   *int
+	nrDonePeers                    *int
+	subject                        string
+	subscriberNrConsumedMessageArr []*uint
+	subscribersDoneArr             []*bool
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -60,14 +62,17 @@ func (bp *BrokerPeer) SetupPublishers() error {
 				subject:     bp.subject,
 			}
 			publisher := &broker.Publisher{
-				PeerOperations:      publisherPeer,
-				Id:                  i,
-				NrMessagesToPublish: numMessPubArr[i-1],
-				MessageSize:         bp.messageSize,
-				SyncMutex:           bp.syncMutex,
-				SyncCond:            bp.syncCond,
-				NrDonePeers:         bp.nrDonePeers,
-				NrReadyPeers:        bp.nrReadyPeers,
+				PeerOperations:           publisherPeer,
+				Id:                       i,
+				NrMessagesToPublish:      numMessPubArr[i-1],
+				MessageSize:              bp.messageSize,
+				SyncMutex:                bp.syncMutex,
+				SyncCond:                 bp.syncCond,
+				NrDonePeers:              bp.nrDonePeers,
+				NrReadyPeers:             bp.nrReadyPeers,
+				SubNrConsumedMessagesArr: bp.subscriberNrConsumedMessageArr,
+				SubscriberDoneArr:        bp.subscribersDoneArr,
+				NrPublishers:             bp.producers,
 			}
 			bp.publisher[i-1] = publisher
 
@@ -82,36 +87,37 @@ func (bp *BrokerPeer) SetupPublishers() error {
 }
 
 func (bp *BrokerPeer) SetupSubscribers() error {
-	subCounter := new(uint)
-	*subCounter = 0
+	if bp.consumers > 0 {
+		// Calculate nr messages to consumer per subscriber
+		numMessSubArr := broker.DividePeerMessages(bp.consumers, bp.numMessages)
 
-	// Create subscribers
-	for i := 1; i <= bp.consumers; i++ {
-		subscriberPeer := &Peer{
-			clusterID: bp.clusterID,
-			recv:      make(chan []byte),
-			subject:   bp.subject,
-		}
-		subscriber := &broker.Subscriber{
-			PeerOperations: subscriberPeer,
-			Id:             i,
-			NumMessages:    bp.numMessages,
-			HasStarted:     false,
-			Started:        0,
-			Stopped:        0,
-			SyncMutex:      bp.syncMutex,
-			SyncCond:       bp.syncCond,
-			NrDonePeers:    bp.nrDonePeers,
-			NrReadyPeers:   bp.nrReadyPeers,
-		}
-		bp.subscriber[i-1] = subscriber
+		// Create subscribers
+		for i := 1; i <= bp.consumers; i++ {
+			subscriberPeer := &Peer{
+				clusterID: bp.clusterID,
+				recv:      make(chan []byte),
+				subject:   bp.subject,
+			}
+			subscriber := &broker.Subscriber{
+				PeerOperations:      subscriberPeer,
+				Id:                  i,
+				NrMessagesToConsume: numMessSubArr[i-1],
+				HasStarted:          false,
+				Started:             0,
+				Stopped:             0,
+				SyncMutex:           bp.syncMutex,
+				SyncCond:            bp.syncCond,
+				NrDonePeers:         bp.nrDonePeers,
+				NrReadyPeers:        bp.nrReadyPeers,
+			}
+			bp.subscriber[i-1] = subscriber
 
-		// Setup subscriber connection
-		err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL)
-		if err != nil {
-			return err
+			// Setup subscriber connection
+			err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL)
+			if err != nil {
+				return err
+			}
 		}
-
 	}
 	return nil
 }
@@ -278,6 +284,18 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	nrDonePeers := new(int)
 	*nrDonePeers = 0
 	*nrReadyPeers = 0
+
+	subscriberMessRead := make([]*uint, settings.Consumers)
+	subscribersDone := make([]*bool, settings.Consumers)
+
+	for i := 0; i < int(settings.Consumers); i++ {
+		messageRead := new(uint)
+		*messageRead = 0
+		subscriberMessRead[i] = messageRead
+		subscriberDone := new(bool)
+		*subscriberDone = false
+		subscribersDone[i] = subscriberDone
+	}
 
 	return &BrokerPeer{
 		connectionURL: connectionURL,

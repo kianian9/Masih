@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"github.com/kianian9/Masih/masih/broker"
 	"github.com/streadway/amqp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -17,29 +19,34 @@ const (
 
 // Peer stores specific AMQP broker connection information
 type Peer struct {
-	conn    *amqp.Connection
-	queue   *amqp.Queue
-	channel *amqp.Channel
-	inbound <-chan amqp.Delivery
-	send    chan []byte
-	errors  chan error
-	done    chan bool
+	conn         *amqp.Connection
+	queue        *amqp.Queue
+	channel      *amqp.Channel
+	inbound      <-chan amqp.Delivery
+	send         chan []byte
+	errors       chan error
+	done         chan bool
+	consumerTag  string
+	queueDeleted *bool
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
 type BrokerPeer struct {
-	connectionURL string
-	queueType     string
-	consumers     int
-	producers     int
-	messageSize   uint64
-	numMessages   uint
-	publisher     []*broker.Publisher
-	subscriber    []*broker.Subscriber
-	syncMutex     *sync.Mutex
-	syncCond      *sync.Cond
-	nrReadyPeers  *int
-	nrDonePeers   *int
+	connectionURL                  string
+	queueType                      string
+	consumers                      int
+	producers                      int
+	messageSize                    uint64
+	numMessages                    uint
+	publisher                      []*broker.Publisher
+	subscriber                     []*broker.Subscriber
+	syncMutex                      *sync.Mutex
+	syncCond                       *sync.Cond
+	nrReadyPeers                   *int
+	nrDonePeers                    *int
+	subscriberNrConsumedMessageArr []*uint
+	subscribersDoneArr             []*bool
+	queuesUnsubscribedArr          []*bool
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -55,14 +62,17 @@ func (bp *BrokerPeer) SetupPublishers() error {
 				done:   make(chan bool),
 			}
 			publisher := &broker.Publisher{
-				PeerOperations:      publisherPeer,
-				Id:                  i,
-				NrMessagesToPublish: numMessPubArr[i-1],
-				MessageSize:         bp.messageSize,
-				SyncMutex:           bp.syncMutex,
-				SyncCond:            bp.syncCond,
-				NrDonePeers:         bp.nrDonePeers,
-				NrReadyPeers:        bp.nrReadyPeers,
+				PeerOperations:           publisherPeer,
+				Id:                       i,
+				NrMessagesToPublish:      numMessPubArr[i-1],
+				MessageSize:              bp.messageSize,
+				SyncMutex:                bp.syncMutex,
+				SyncCond:                 bp.syncCond,
+				NrDonePeers:              bp.nrDonePeers,
+				NrReadyPeers:             bp.nrReadyPeers,
+				SubNrConsumedMessagesArr: bp.subscriberNrConsumedMessageArr,
+				SubscriberDoneArr:        bp.subscribersDoneArr,
+				NrPublishers:             bp.producers,
 			}
 			bp.publisher[i-1] = publisher
 
@@ -77,32 +87,38 @@ func (bp *BrokerPeer) SetupPublishers() error {
 }
 
 func (bp *BrokerPeer) SetupSubscribers() error {
-	subCounter := new(uint)
-	*subCounter = 0
+	if bp.consumers > 0 {
+		// Calculate nr messages to consumer per subscriber
+		numMessSubArr := broker.DividePeerMessages(bp.consumers, bp.numMessages)
 
-	// Create subscribers
-	for i := 1; i <= bp.consumers; i++ {
-		subscriberPeer := &Peer{}
-		subscriber := &broker.Subscriber{
-			PeerOperations: subscriberPeer,
-			Id:             i,
-			NumMessages:    bp.numMessages,
-			HasStarted:     false,
-			Started:        0,
-			Stopped:        0,
-			SyncMutex:      bp.syncMutex,
-			SyncCond:       bp.syncCond,
-			NrDonePeers:    bp.nrDonePeers,
-			NrReadyPeers:   bp.nrReadyPeers,
+		// Create subscribers
+		for i := 1; i <= bp.consumers; i++ {
+			subscriberPeer := &Peer{
+				consumerTag:  "subscriber" + strconv.Itoa(i),
+				queueDeleted: bp.queuesUnsubscribedArr[i-1],
+			}
+			subscriber := &broker.Subscriber{
+				PeerOperations:      subscriberPeer,
+				Id:                  i,
+				NrMessagesToConsume: numMessSubArr[i-1],
+				HasStarted:          false,
+				Started:             0,
+				Stopped:             0,
+				SyncMutex:           bp.syncMutex,
+				SyncCond:            bp.syncCond,
+				NrDonePeers:         bp.nrDonePeers,
+				NrReadyPeers:        bp.nrReadyPeers,
+				NrMessagesConsumed:  bp.subscriberNrConsumedMessageArr[i-1],
+				SubscriberDone:      bp.subscribersDoneArr[i-1],
+			}
+			bp.subscriber[i-1] = subscriber
+
+			// Setup subscriber connection
+			err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL, bp.queueType)
+			if err != nil {
+				return err
+			}
 		}
-		bp.subscriber[i-1] = subscriber
-
-		// Setup subscriber connection
-		err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL, bp.queueType)
-		if err != nil {
-			return err
-		}
-
 	}
 	return nil
 }
@@ -248,13 +264,13 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 	}
 
 	p.inbound, err = p.channel.Consume(
-		p.queue.Name, // queue
-		"",           // consumer
-		true,         // auto-ack
-		false,        // exclusive
-		false,        // no-local
-		false,        // no-wait
-		nil,          // args
+		p.queue.Name,  // queue
+		p.consumerTag, // consumerTag
+		true,          // auto-ack
+		false,         // exclusive
+		true,          // no-local
+		false,         // no-wait
+		nil,           // args
 	)
 
 	if err != nil {
@@ -274,7 +290,20 @@ func (bp *BrokerPeer) StartPublishers() {
 func (bp *BrokerPeer) StartSubscribers() {
 	nrPeers := bp.producers + bp.consumers
 	for _, element := range bp.subscriber {
-		go element.StartSubscribing(nrPeers)
+		element := element
+		go func() {
+			element.StartSubscribing(nrPeers)
+			peer := element.PeerOperations.(*Peer)
+			// Unsubscribing "done" client from receiving messages
+			peer.channel.Cancel(peer.consumerTag, true)
+			// Unbind queue from exchange
+			peer.channel.QueueUnbind(peer.queue.Name, "", exchange, nil)
+			// Unbind exchange
+			peer.channel.ExchangeUnbind(peer.queue.Name, "", exchange, true, nil)
+			bp.syncMutex.Lock()
+			*peer.queueDeleted = true
+			bp.syncMutex.Unlock()
+		}()
 	}
 }
 
@@ -313,6 +342,16 @@ func (bp *BrokerPeer) Teardown() {
 		peer.channel.Close()
 		peer.conn.Close()
 	}
+	// Wait for all subscribers to unsubscribe from queue
+	i := 0
+	for i < bp.consumers {
+		peer := bp.subscriber[i].PeerOperations.(*Peer)
+		if *peer.queueDeleted {
+			i++
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
@@ -332,18 +371,37 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	*nrDonePeers = 0
 	*nrReadyPeers = 0
 
+	subscriberMessRead := make([]*uint, settings.Consumers)
+	subscribersDone := make([]*bool, settings.Consumers)
+	queuesUnsubscribed := make([]*bool, settings.Consumers)
+
+	for i := 0; i < int(settings.Consumers); i++ {
+		messageRead := new(uint)
+		*messageRead = 0
+		subscriberMessRead[i] = messageRead
+		subscriberDone := new(bool)
+		*subscriberDone = false
+		queueUnsubscribed := new(bool)
+		*queueUnsubscribed = false
+		subscribersDone[i] = subscriberDone
+		queuesUnsubscribed[i] = queueUnsubscribed
+	}
+
 	return &BrokerPeer{
-		connectionURL: connectionURL,
-		queueType:     settings.QueueType,
-		consumers:     int(settings.Consumers),
-		producers:     int(settings.Producers),
-		messageSize:   settings.MessageSize,
-		numMessages:   settings.NumMessages,
-		publisher:     make([]*broker.Publisher, settings.Producers),
-		subscriber:    make([]*broker.Subscriber, settings.Consumers),
-		syncMutex:     &m,
-		syncCond:      c,
-		nrReadyPeers:  nrReadyPeers,
-		nrDonePeers:   nrDonePeers,
+		connectionURL:                  connectionURL,
+		queueType:                      settings.QueueType,
+		consumers:                      int(settings.Consumers),
+		producers:                      int(settings.Producers),
+		messageSize:                    settings.MessageSize,
+		numMessages:                    settings.NumMessages,
+		publisher:                      make([]*broker.Publisher, settings.Producers),
+		subscriber:                     make([]*broker.Subscriber, settings.Consumers),
+		syncMutex:                      &m,
+		syncCond:                       c,
+		nrReadyPeers:                   nrReadyPeers,
+		nrDonePeers:                    nrDonePeers,
+		subscriberNrConsumedMessageArr: subscriberMessRead,
+		subscribersDoneArr:             subscribersDone,
+		queuesUnsubscribedArr:          queuesUnsubscribed,
 	}
 }

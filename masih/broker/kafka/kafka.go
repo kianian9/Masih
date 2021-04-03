@@ -17,8 +17,9 @@ const (
 
 // Consumer represents a Sarama consumer group consumer
 type Consumer struct {
-	ready chan bool
-	recv  chan []byte
+	ready   chan bool
+	recv    chan []byte
+	numMess uint
 }
 
 // Peer stores specific Kafka broker connection information
@@ -39,18 +40,20 @@ type Peer struct {
 
 // BrokerPeer implements the peer interface for AMQP brokers
 type BrokerPeer struct {
-	connectionURL string
-	consumers     int
-	producers     int
-	messageSize   uint64
-	numMessages   uint
-	publisher     []*broker.Publisher
-	subscriber    []*broker.Subscriber
-	syncMutex     *sync.Mutex
-	syncCond      *sync.Cond
-	nrReadyPeers  *int
-	nrDonePeers   *int
-	topic         string
+	connectionURL                  string
+	consumers                      int
+	producers                      int
+	messageSize                    uint64
+	numMessages                    uint
+	publisher                      []*broker.Publisher
+	subscriber                     []*broker.Subscriber
+	syncMutex                      *sync.Mutex
+	syncCond                       *sync.Cond
+	nrReadyPeers                   *int
+	nrDonePeers                    *int
+	topic                          string
+	subscriberNrConsumedMessageArr []*uint
+	subscribersDoneArr             []*bool
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -70,14 +73,17 @@ func (bp *BrokerPeer) SetupPublishers() error {
 				topic:       bp.topic,
 			}
 			publisher := &broker.Publisher{
-				PeerOperations:      publisherPeer,
-				Id:                  i,
-				NrMessagesToPublish: numMessPubArr[i-1],
-				MessageSize:         bp.messageSize,
-				SyncMutex:           bp.syncMutex,
-				SyncCond:            bp.syncCond,
-				NrDonePeers:         bp.nrDonePeers,
-				NrReadyPeers:        bp.nrReadyPeers,
+				PeerOperations:           publisherPeer,
+				Id:                       i,
+				NrMessagesToPublish:      numMessPubArr[i-1],
+				MessageSize:              bp.messageSize,
+				SyncMutex:                bp.syncMutex,
+				SyncCond:                 bp.syncCond,
+				NrDonePeers:              bp.nrDonePeers,
+				NrReadyPeers:             bp.nrReadyPeers,
+				SubNrConsumedMessagesArr: bp.subscriberNrConsumedMessageArr,
+				SubscriberDoneArr:        bp.subscribersDoneArr,
+				NrPublishers:             bp.producers,
 			}
 			bp.publisher[i-1] = publisher
 
@@ -92,33 +98,43 @@ func (bp *BrokerPeer) SetupPublishers() error {
 }
 
 func (bp *BrokerPeer) SetupSubscribers() error {
-	subCounter := new(uint)
-	*subCounter = 0
+	if bp.consumers > 0 {
+		// Calculate nr messages to consumer per subscriber
+		numMessSubArr := broker.DividePeerMessages(bp.consumers, bp.numMessages)
 
-	// Create subscribers
-	for i := 1; i <= bp.consumers; i++ {
-		subscriberPeer := &Peer{
-			brokersDown: make(chan bool),
-			topic:       bp.topic,
-		}
-		subscriber := &broker.Subscriber{
-			PeerOperations: subscriberPeer,
-			Id:             i,
-			NumMessages:    bp.numMessages,
-			HasStarted:     false,
-			Started:        0,
-			Stopped:        0,
-			SyncMutex:      bp.syncMutex,
-			SyncCond:       bp.syncCond,
-			NrDonePeers:    bp.nrDonePeers,
-			NrReadyPeers:   bp.nrReadyPeers,
-		}
-		bp.subscriber[i-1] = subscriber
+		// Create subscribers
+		for i := 1; i <= bp.consumers; i++ {
+			subscriberPeer := &Peer{
+				brokersDown: make(chan bool),
+				topic:       bp.topic,
+			}
+			subscriber := &broker.Subscriber{
+				PeerOperations:      subscriberPeer,
+				Id:                  i,
+				NrMessagesToConsume: numMessSubArr[i-1],
+				HasStarted:          false,
+				Started:             0,
+				Stopped:             0,
+				SyncMutex:           bp.syncMutex,
+				SyncCond:            bp.syncCond,
+				NrDonePeers:         bp.nrDonePeers,
+				NrReadyPeers:        bp.nrReadyPeers,
+				NrMessagesConsumed:  bp.subscriberNrConsumedMessageArr[i-1],
+				SubscriberDone:      bp.subscribersDoneArr[i-1],
+			}
+			bp.subscriber[i-1] = subscriber
 
-		// Setup subscriber connection
-		err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL)
-		if err != nil {
-			return err
+			subscriberPeer.consumer = &Consumer{
+				ready:   make(chan bool),
+				recv:    make(chan []byte),
+				numMess: numMessSubArr[i-1],
+			}
+
+			// Setup subscriber connection
+			err := subscriberPeer.SetupSubscriberConnection(bp.connectionURL)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -141,7 +157,7 @@ func (p *Peer) SetupPublishRoutine() {
 
 func (p *Peer) sendMessage(message []byte) error {
 	select {
-	case p.producer.Input() <- &sarama.ProducerMessage{Topic: p.topic, Key: nil, Value: sarama.ByteEncoder(message)}:
+	case p.producer.Input() <- &sarama.ProducerMessage{Topic: p.topic, Value: sarama.ByteEncoder(message)}:
 		return nil
 	case err := <-p.producer.Errors():
 		return err.Err
@@ -184,9 +200,14 @@ func (consumer *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
 // ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
 // NOTE: The function itself is called within a goroutine
 func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	var nrMessages uint = 0
 	for message := range claim.Messages() {
 		consumer.recv <- message.Value
 		session.MarkMessage(message, "")
+		nrMessages++
+		if nrMessages == consumer.numMess {
+			break
+		}
 	}
 	return nil
 }
@@ -205,7 +226,7 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 	config.Producer.Compression = sarama.CompressionNone
 
 	// Wait for partition leader to ack message
-	config.Producer.RequiredAcks = sarama.WaitForLocal
+	config.Producer.RequiredAcks = sarama.WaitForAll
 
 	// Setting Round Robin partitioning for publishing messages
 	config.Producer.Partitioner = sarama.NewRoundRobinPartitioner
@@ -216,7 +237,7 @@ func (p *Peer) SetupPublisherConnection(connectionURL string) error {
 		return err
 	}
 
-	p.producer, err = sarama.NewAsyncProducer([]string{connectionURL}, config)
+	p.producer, err = sarama.NewAsyncProducerFromClient(p.client)
 	if err != nil {
 		return err
 	}
@@ -228,11 +249,11 @@ func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 	var err error = nil
 	// Connecting to the broker, with unique groupIds for receiving all records
 	config := sarama.NewConfig()
-	kfversion, err := sarama.ParseKafkaVersion(kafkaVersion)
+	kfVersion, err := sarama.ParseKafkaVersion(kafkaVersion)
 	if err != nil {
 		return err
 	}
-	config.Version = kfversion
+	config.Version = kfVersion
 
 	// Using the Round Robin partition balance strategy
 	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
@@ -245,17 +266,13 @@ func (p *Peer) SetupSubscriberConnection(connectionURL string) error {
 		return err
 	}
 
-	p.consumer = &Consumer{
-		ready: make(chan bool),
-		recv:  make(chan []byte),
-	}
-
 	p.consumerGroup, err = sarama.NewConsumerGroupFromClient(broker.GenerateName(), p.client)
 	if err != nil {
 		return err
 	}
 	p.context = context.Background()
 
+	// Starting consumer
 	go func() {
 		if err := p.consumerGroup.Consume(p.context, []string{p.topic}, p.consumer); err != nil {
 			return
@@ -314,12 +331,11 @@ func (bp *BrokerPeer) Teardown() {
 		peer := element.PeerOperations.(*Peer)
 		peer.producer.Close()
 		peer.client.Close()
-
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
 		peer := element.PeerOperations.(*Peer)
-		peer.consumerGroup.Close()
+		//peer.consumerGroup.Close()
 		peer.client.Close()
 	}
 }
@@ -334,18 +350,32 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	*nrDonePeers = 0
 	*nrReadyPeers = 0
 
+	subscriberMessRead := make([]*uint, settings.Consumers)
+	subscribersDone := make([]*bool, settings.Consumers)
+
+	for i := 0; i < int(settings.Consumers); i++ {
+		messageRead := new(uint)
+		*messageRead = 0
+		subscriberMessRead[i] = messageRead
+		subscriberDone := new(bool)
+		*subscriberDone = false
+		subscribersDone[i] = subscriberDone
+	}
+
 	return &BrokerPeer{
-		connectionURL: connectionURL,
-		consumers:     int(settings.Consumers),
-		producers:     int(settings.Producers),
-		messageSize:   settings.MessageSize,
-		numMessages:   settings.NumMessages,
-		publisher:     make([]*broker.Publisher, settings.Producers),
-		subscriber:    make([]*broker.Subscriber, settings.Consumers),
-		syncMutex:     &m,
-		syncCond:      c,
-		nrReadyPeers:  nrReadyPeers,
-		nrDonePeers:   nrDonePeers,
-		topic:         settings.Topic,
+		connectionURL:                  connectionURL,
+		consumers:                      int(settings.Consumers),
+		producers:                      int(settings.Producers),
+		messageSize:                    settings.MessageSize,
+		numMessages:                    settings.NumMessages,
+		publisher:                      make([]*broker.Publisher, settings.Producers),
+		subscriber:                     make([]*broker.Subscriber, settings.Consumers),
+		syncMutex:                      &m,
+		syncCond:                       c,
+		nrReadyPeers:                   nrReadyPeers,
+		nrDonePeers:                    nrDonePeers,
+		topic:                          settings.Topic,
+		subscriberNrConsumedMessageArr: subscriberMessRead,
+		subscribersDoneArr:             subscribersDone,
 	}
 }
