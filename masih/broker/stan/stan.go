@@ -109,6 +109,8 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 				SyncCond:            bp.syncCond,
 				NrDonePeers:         bp.nrDonePeers,
 				NrReadyPeers:        bp.nrReadyPeers,
+				NrMessagesConsumed:  bp.subscriberNrConsumedMessageArr[i-1],
+				SubscriberDone:      bp.subscribersDoneArr[i-1],
 			}
 			bp.subscriber[i-1] = subscriber
 
@@ -298,18 +300,20 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 	}
 
 	return &BrokerPeer{
-		connectionURL: connectionURL,
-		clusterID:     settings.ClusterID,
-		consumers:     int(settings.Consumers),
-		producers:     int(settings.Producers),
-		messageSize:   settings.MessageSize,
-		numMessages:   settings.NumMessages,
-		publisher:     make([]*broker.Publisher, settings.Producers),
-		subscriber:    make([]*broker.Subscriber, settings.Consumers),
-		syncMutex:     &m,
-		syncCond:      c,
-		nrReadyPeers:  nrReadyPeers,
-		nrDonePeers:   nrDonePeers,
-		subject:       settings.Topic,
+		connectionURL:                  connectionURL,
+		clusterID:                      settings.ClusterID,
+		consumers:                      int(settings.Consumers),
+		producers:                      int(settings.Producers),
+		messageSize:                    settings.MessageSize,
+		numMessages:                    settings.NumMessages,
+		publisher:                      make([]*broker.Publisher, settings.Producers),
+		subscriber:                     make([]*broker.Subscriber, settings.Consumers),
+		syncMutex:                      &m,
+		syncCond:                       c,
+		nrReadyPeers:                   nrReadyPeers,
+		nrDonePeers:                    nrDonePeers,
+		subject:                        settings.Topic,
+		subscriberNrConsumedMessageArr: subscriberMessRead,
+		subscribersDoneArr:             subscribersDone,
 	}
 }
