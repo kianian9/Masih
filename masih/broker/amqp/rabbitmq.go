@@ -7,27 +7,26 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
-	exchange      = "logs"
-	exchangeType  = "fanout"
-	QUOROM_QUEUE  = "QUORUM"
-	CLASSIC_QUEUE = "CLASSIC"
+	exchange               = "logs"
+	exchangeType           = "fanout"
+	QUOROM_QUEUE           = "QUORUM"
+	CLASSIC_QUEUE          = "CLASSIC"
+	MAX_QUEUE_LENGTH_BYTES = 1024 * 1024 * 20 // 20MB
 )
 
 // Peer stores specific AMQP broker connection information
 type Peer struct {
-	conn         *amqp.Connection
-	queue        *amqp.Queue
-	channel      *amqp.Channel
-	inbound      <-chan amqp.Delivery
-	send         chan []byte
-	errors       chan error
-	done         chan bool
-	consumerTag  string
-	queueDeleted *bool
+	conn        *amqp.Connection
+	queue       *amqp.Queue
+	channel     *amqp.Channel
+	inbound     <-chan amqp.Delivery
+	send        chan []byte
+	errors      chan error
+	done        chan bool
+	consumerTag string
 }
 
 // BrokerPeer implements the peer interface for AMQP brokers
@@ -46,7 +45,6 @@ type BrokerPeer struct {
 	nrDonePeers                    *int
 	subscriberNrConsumedMessageArr []*uint
 	subscribersDoneArr             []*bool
-	queuesUnsubscribedArr          []*bool
 }
 
 func (bp *BrokerPeer) SetupPublishers() error {
@@ -94,8 +92,7 @@ func (bp *BrokerPeer) SetupSubscribers() error {
 		// Create subscribers
 		for i := 1; i <= bp.consumers; i++ {
 			subscriberPeer := &Peer{
-				consumerTag:  "subscriber" + strconv.Itoa(i),
-				queueDeleted: bp.queuesUnsubscribedArr[i-1],
+				consumerTag: "subscriber" + strconv.Itoa(i),
 			}
 			subscriber := &broker.Subscriber{
 				PeerOperations:      subscriberPeer,
@@ -236,6 +233,11 @@ func (p *Peer) SetupSubscriberConnection(connectionURL, queueType string) error 
 		args["x-queue-mode"] = "lazy"
 	}
 
+	// Setting queue max-length in bytes for not overflowing queue
+	// Especially important when subscribers are done and publishers still publishing messages
+	// NOTE: This value must be larger than maxBytesBehind in publisher!
+	args["x-max-length-bytes"] = MAX_QUEUE_LENGTH_BYTES
+
 	// Declaring a durable queue
 	q, err := p.channel.QueueDeclare(
 		broker.GenerateName(), // name
@@ -290,19 +292,14 @@ func (bp *BrokerPeer) StartPublishers() {
 func (bp *BrokerPeer) StartSubscribers() {
 	nrPeers := bp.producers + bp.consumers
 	for _, element := range bp.subscriber {
+		//go element.StartSubscribing(nrPeers)
 		element := element
 		go func() {
 			element.StartSubscribing(nrPeers)
 			peer := element.PeerOperations.(*Peer)
-			// Unsubscribing "done" client from receiving messages
-			peer.channel.Cancel(peer.consumerTag, true)
-			// Unbind queue from exchange
-			peer.channel.QueueUnbind(peer.queue.Name, "", exchange, nil)
-			// Unbind exchange
-			peer.channel.ExchangeUnbind(peer.queue.Name, "", exchange, true, nil)
-			bp.syncMutex.Lock()
-			*peer.queueDeleted = true
-			bp.syncMutex.Unlock()
+			// Disconnecting subscriber - Will otherwise continue receive data
+			peer.channel.Close()
+			peer.conn.Close()
 		}()
 	}
 }
@@ -341,16 +338,6 @@ func (bp *BrokerPeer) Teardown() {
 		peer := element.PeerOperations.(*Peer)
 		peer.channel.Close()
 		peer.conn.Close()
-	}
-	// Wait for all subscribers to unsubscribe from queue
-	i := 0
-	for i < bp.consumers {
-		peer := bp.subscriber[i].PeerOperations.(*Peer)
-		if *peer.queueDeleted {
-			i++
-		} else {
-			time.Sleep(10 * time.Millisecond)
-		}
 	}
 	// Closing subscriber sockets
 	for _, element := range bp.subscriber {
@@ -402,6 +389,5 @@ func NewBrokerPeer(settings broker.MQSettings) *BrokerPeer {
 		nrDonePeers:                    nrDonePeers,
 		subscriberNrConsumedMessageArr: subscriberMessRead,
 		subscribersDoneArr:             subscribersDone,
-		queuesUnsubscribedArr:          queuesUnsubscribed,
 	}
 }
