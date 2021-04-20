@@ -230,7 +230,14 @@ func (bp *BrokerPeer) StartPublishers() {
 func (bp *BrokerPeer) StartSubscribers() {
 	nrPeers := bp.producers + bp.consumers
 	for _, element := range bp.subscriber {
-		go element.StartSubscribing(nrPeers)
+		element := element
+		go func() {
+			element.StartSubscribing(nrPeers)
+			peer := element.PeerOperations.(*Peer)
+			// Disconnecting subscriber
+			peer.subscription.Unsubscribe()
+			peer.stanConnection.Close()
+		}()
 	}
 }
 
