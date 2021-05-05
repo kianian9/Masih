@@ -1,6 +1,6 @@
 # Masih
 Masih - Message Queue Benchmarking Tool is a concurrent evaluation tool that could be used for benchmarking **Kafka**, **NATS Streaming (STAN)**, and **RabbitMQ** message queues.
-Masih provides automated orchestration for benchmarking message queues in parallelized configurations, where it is possible to evaluate a message broker with arbitrarily many producers and consumers with a single command.
+Masih provides automated orchestration for benchmarking message queues in parallelized configurations, where it is possible to evaluate a message broker with arbitrarily many producers and consumers with a single command. This tool is available as a [Docker image](https://hub.docker.com/r/kianian9/masih) as well.
 
 ## Installation
 Masih uses a Go module that collects all dependencies needed in order to run the application. The benchmarking framework can be installed by running following from masih directory:
